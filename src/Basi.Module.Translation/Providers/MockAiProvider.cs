@@ -21,6 +21,9 @@ public class MockAiProvider : IAiProvider
 
     public async Task<AiResponse> CompleteAsync(AiRequest request, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        ct.ThrowIfCancellationRequested();
+
         return _options.Scenario switch
         {
             MockScenario.Success => await HandleSuccess(request, ct),

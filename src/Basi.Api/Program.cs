@@ -72,17 +72,19 @@ app.UseAuthorization();
 app.UseAntiforgery();
 
 // ---------- Health endpoint ----------
-app.MapGet("/api/health", async (BasiDbContext db) =>
+app.MapGet("/api/health", async (BasiDbContext db, CancellationToken ct) =>
 {
     var dbStatus = "disconnected";
     try
     {
-        if (await db.Database.CanConnectAsync())
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(2));
+        if (await db.Database.CanConnectAsync(timeoutCts.Token))
             dbStatus = "connected";
     }
     catch
     {
-        // DB unreachable — that's fine, report disconnected
+        // DB unreachable or timed out — report disconnected safely without hanging
     }
 
     return Results.Ok(new
