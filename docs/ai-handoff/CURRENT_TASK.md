@@ -3,22 +3,17 @@
 ## Task ID: BASI-001
 ## Task Name: Foundation & Repository Bootstrap
 ## Session: SESSION-001
-## Status: In Progress
+## Status: Completed
 
-### Scope
-1. ASP.NET Core solution with Modular Monolith structure
-2. Core project with `IAiProvider` interface and domain models
-3. Health check endpoint (`GET /api/health`)
-4. MockAiProvider with configurable scenarios (success, error, timeout, rate limit)
-5. Unit tests for MockAiProvider and health check
-6. SvelteKit frontend project scaffold
-7. Docker Compose with PostgreSQL
-8. Project documentation (README, AGENTS, Architecture, Contracts, Decisions, Test Plan)
+### Completed Scope
+1. Development environment verification (.NET SDK 11.0.100, Git 2.56.0, Node/Docker absence identified)
+2. ASP.NET Core solution and Modular Monolith structure (`Basi.Api`, `Basi.Core`, `Basi.Module.Identity`, `Basi.Module.Translation`, `Basi.Module.StoryMemory`)
+3. Health check endpoint (`GET /api/health`) with graceful PostgreSQL connectivity check
+4. Provider Adapter abstraction (`IAiProvider`) and configurable `MockAiProvider` with 6 fault-injection scenarios
+5. Automated test suite (`Basi.Tests.Unit`, `Basi.Tests.Integration`) with 8 passing tests
+6. SvelteKit 2 + Svelte 5 (Runes) + TailwindCSS v4 frontend structure with `/api` proxy and live health check dashboard
+7. Docker Compose setup for PostgreSQL 17 development database
+8. Complete core documentation: `AGENTS.md`, `README.md`, `MASTER_PLAN.md`, `ARCHITECTURE.md`, `CONTRACTS.md`, `DECISIONS.md`, `TEST_PLAN.md`
 
-### Not In Scope
-- Google OAuth (Task 2)
-- Real AI Provider adapters (Task 3)
-- Translation Engine (Task 3)
-- Story Analysis & Memory (Task 4)
-- Project Management UI (Task 5)
-- Production deployment (Task 6)
+### Next Task
+- BASI-002: Authentication & TXT Upload
