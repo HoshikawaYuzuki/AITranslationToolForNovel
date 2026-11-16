@@ -12,7 +12,11 @@
 - [x] Frontend dependencies installed via pnpm & production build verified (`pnpm build` & `pnpm check` passed with 0 errors)
 - [x] Docker Compose setup (PostgreSQL 17 + init.sql)
 - [x] Core documentation (AGENTS.md, README, ARCHITECTURE, CONTRACTS, DECISIONS, TEST_PLAN)
-- [x] Automated test suite passing (12/12 tests passed)
+- [x] Automated test suite passing — **19/19 tests verified at runtime** (13 unit + 6 integration)
+- [x] Integration tests: `HealthEndpointIntegrationTests` (6 tests via `WebApplicationFactory` + `Testing` environment)
+- [x] Dev credential documented: `basi_dev_password` is a local-dev-only credential in `appsettings.Development.json`; not a production secret
+- [x] `appsettings.Testing.json` added for test environment (no live DB required)
+- [x] Independent re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` all findings resolved
 
 ### Next Phase
 - Task 2: Authentication & TXT Upload (Google OAuth, Identity, Owner Authorization, TXT Chunking, Segment Model)

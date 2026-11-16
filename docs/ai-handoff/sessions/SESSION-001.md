@@ -47,18 +47,30 @@
 ---
 
 ## 3. Build and Test Verification
-- **Backend Build (`dotnet build`)**: Succeeded (0 Warning(s), 0 Error(s)) across all projects.
-- **Backend Tests (`dotnet test`)**: **12/12 tests passed**:
+- **Backend Build (`dotnet build`)**: Succeeded (0 Warning(s), 0 Error(s)) across all 7 projects.
+- **Backend Tests (`dotnet test Basi.sln`)**: **19/19 tests PASS (verified at runtime):**
   - `MockAiProviderTests` (6 scenario tests): PASSED
   - `MockAiProviderEdgeCaseTests` (4 edge-case tests: null request, cancellation token, empty prompts, invalid enum): PASSED
-  - `HealthCheckTests.HealthEndpoint_ReturnsCorrectShape`: PASSED (verifies 200 OK, JSON schema, database disconnected status when DB is offline)
-  - `PlaceholderTests.Placeholder_Integration_Test`: PASSED
+  - `HealthCheckTests` (3 tests via `WebApplicationFactory` + Testing env — `ReturnsOk`, `ReturnsCorrectShape`, `DatabaseField_IsDisconnectedWhenNoDb`): PASSED
+  - `HealthEndpointIntegrationTests` (6 integration tests via `WebApplicationFactory` — HTTP 200, valid JSON, `status=healthy`, `version=0.1.0`, database enum, ISO-8601 timestamp): PASSED
 - **Frontend Build (`pnpm build`)**: Succeeded with production bundle generated in `.svelte-kit/output`.
 - **Frontend Type & Syntax Check (`pnpm check`)**: Succeeded with 0 errors and 0 warnings.
+- **Health endpoint runtime verification**: Confirmed `{"status":"healthy","timestamp":"...","version":"0.1.0","database":"disconnected"}` via WebApplicationFactory (no live DB required).
 
 ---
 
-## 4. Guidance for Next AI Session (BASI-002)
+## 4. Re-Audit Remediation (2026-11-16)
+Targeted re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` identified 3 remaining gaps; all resolved in commit `c4ccec7`:
+
+| Issue | Resolution |
+|-------|------------|
+| Test runner produced no summary (hung at discovery) | Root cause: `WebApplicationFactory` without env override tried to load `appsettings.Development.json` which needs Npgsql to be configured; fixed by `UseEnvironment("Testing")` + `appsettings.Testing.json` |
+| Integration test was `Assert.True(true)` placeholder | Replaced with 6 real integration tests covering full health endpoint contract |
+| `basi_dev_password` undocumented | Added block comment in `appsettings.Development.json`; added `appsettings.Local.json` override guidance; updated `.gitignore` to track `appsettings.Testing.json` |
+
+---
+
+## 5. Guidance for Next AI Session (BASI-002)
 - Do NOT rewrite or alter existing project architecture or ADRs without explicit user approval.
 - Next Task: **Task 2 — Authentication & TXT Upload** (Google OAuth / Identity, TXT Upload, Semantic Segment Model, Ownership Authorization).
 - When implementing Task 2, remember: API keys must remain RAM-only (never persisted), and every entity must have an `OwnerId`.
