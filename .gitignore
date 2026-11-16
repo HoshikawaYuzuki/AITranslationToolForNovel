@@ -73,6 +73,9 @@ Desktop.ini
 appsettings.*.json
 !appsettings.json
 !appsettings.Development.json
+# appsettings.Testing.json — committed; contains a non-secret test-only DB connection
+!appsettings.Testing.json
+# appsettings.Local.json — git-ignored; for per-developer overrides without modifying tracked files
 
 # =========================
 # Docker
