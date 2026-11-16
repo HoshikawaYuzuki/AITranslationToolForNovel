@@ -1,1 +1,98 @@
-.agents/
+# =========================
+# .NET / C#
+# =========================
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# NuGet
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# MSBuild
+*.log
+msbuild.wrn
+msbuild.err
+
+# =========================
+# Node.js / Frontend
+# =========================
+node_modules/
+.pnpm-store/
+dist/
+.svelte-kit/
+build/
+.output/
+.vercel/
+.netlify/
+
+# =========================
+# IDE / Editor
+# =========================
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code — keep launch.json, ignore the rest
+.vscode/*
+!.vscode/launch.json
+
+# JetBrains Rider
+*.DotSettings.user
+
+# =========================
+# OS Files
+# =========================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+appsettings.*.json
+!appsettings.json
+!appsettings.Development.json
+
+# =========================
+# Docker
+# =========================
+docker-data/
+.docker-volumes/
+
+# =========================
+# Test Results
+# =========================
+TestResults/
+coverage/
+*.trx
+lcov.info
+.coverage
+
+# =========================
+# Misc
+# =========================
+*.tmp
+*.bak
+*.orig
+.cache/

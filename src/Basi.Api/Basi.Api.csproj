@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Basi.Api</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.*" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.*" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="7.2.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Basi.Core\Basi.Core.csproj" />
+    <ProjectReference Include="..\Basi.Module.Identity\Basi.Module.Identity.csproj" />
+    <ProjectReference Include="..\Basi.Module.Translation\Basi.Module.Translation.csproj" />
+    <ProjectReference Include="..\Basi.Module.StoryMemory\Basi.Module.StoryMemory.csproj" />
+  </ItemGroup>
+</Project>
