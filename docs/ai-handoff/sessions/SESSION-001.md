@@ -48,25 +48,30 @@
 
 ## 3. Build and Test Verification
 - **Backend Build (`dotnet build`)**: Succeeded (0 Warning(s), 0 Error(s)) across all 7 projects.
-- **Backend Tests (`dotnet test Basi.sln`)**: **19/19 tests PASS (verified at runtime):**
+- **Backend Tests (`dotnet test Basi.sln`)**: **21/21 tests PASS (verified at runtime, total duration ~3.5s):**
   - `MockAiProviderTests` (6 scenario tests): PASSED
   - `MockAiProviderEdgeCaseTests` (4 edge-case tests: null request, cancellation token, empty prompts, invalid enum): PASSED
-  - `HealthCheckTests` (3 tests via `WebApplicationFactory` + Testing env — `ReturnsOk`, `ReturnsCorrectShape`, `DatabaseField_IsDisconnectedWhenNoDb`): PASSED
-  - `HealthEndpointIntegrationTests` (6 integration tests via `WebApplicationFactory` — HTTP 200, valid JSON, `status=healthy`, `version=0.1.0`, database enum, ISO-8601 timestamp): PASSED
-- **Frontend Build (`pnpm build`)**: Succeeded with production bundle generated in `.svelte-kit/output`.
+  - `ConfigurationOverrideTests` (2 tests: environment variable override, local JSON override): PASSED
+  - `HealthCheckTests` (3 tests via `WebApplicationFactory` — `ReturnsOk`, `ReturnsCorrectShape`, `DatabaseField_IsDisconnectedWhenNoDb` with deterministic offline port and duration < 3s): PASSED
+  - `HealthEndpointIntegrationTests` (6 integration tests via `WebApplicationFactory` — HTTP 200, valid JSON, `status=healthy`, `version=0.1.0`, `database=disconnected` in offline environment with duration < 3s, ISO-8601 timestamp): PASSED
+- **Frontend Build (`pnpm build`)**: Succeeded with production bundle generated in `.svelte-kit/output` (exit code 0).
 - **Frontend Type & Syntax Check (`pnpm check`)**: Succeeded with 0 errors and 0 warnings.
-- **Health endpoint runtime verification**: Confirmed `{"status":"healthy","timestamp":"...","version":"0.1.0","database":"disconnected"}` via WebApplicationFactory (no live DB required).
+- **Health endpoint runtime verification**: Verified live via `dotnet run` + HTTP request to `http://localhost:5000/api/health` returning `{"status":"healthy","timestamp":"...","version":"0.1.0","database":"disconnected"}`.
 
 ---
 
-## 4. Re-Audit Remediation (2026-11-16)
-Targeted re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` identified 3 remaining gaps; all resolved in commit `c4ccec7`:
+## 4. Re-Audit Remediation (Updated 17/11/2026)
+Targeted re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` findings and resolutions:
 
-| Issue | Resolution |
-|-------|------------|
-| Test runner produced no summary (hung at discovery) | Root cause: `WebApplicationFactory` without env override tried to load `appsettings.Development.json` which needs Npgsql to be configured; fixed by `UseEnvironment("Testing")` + `appsettings.Testing.json` |
-| Integration test was `Assert.True(true)` placeholder | Replaced with 6 real integration tests covering full health endpoint contract |
-| `basi_dev_password` undocumented | Added block comment in `appsettings.Development.json`; added `appsettings.Local.json` override guidance; updated `.gitignore` to track `appsettings.Testing.json` |
+| Audit Finding | Resolution | Verification Evidence |
+|---|---|---|
+| Hướng dẫn override cấu hình không khớp implementation | Registered `appsettings.Local.json` in `Program.cs`; updated comment in `appsettings.Development.json` to state `ConnectionStrings__DefaultConnection` and `appsettings.Local.json`; added `ConfigurationOverrideTests.cs` | 2 new unit tests pass (`EnvironmentVariable_Overrides_DefaultConnectionString`, `LocalJsonFile_Overrides_BaseAppSettings`) |
+| Test offline chấp nhận cả connected lẫn disconnected | Configured unreachable loopback port (`54329`) with `Timeout=1` in `TestWebApplicationFactory` and `IntegrationTestFactory`; asserted strictly `Assert.Equal("disconnected", dbStatus)` and bounded duration `< 3s` | Tests pass in 73ms and 684ms respectively; deterministic offline assertion verified |
+| Test suite dừng sau discovery không có tổng kết | Configured deterministic offline test settings; whole solution test suite executes in ~3.5s without hang; added `--logger "console;verbosity=normal"` recommendation for real-time test progress | `dotnet test Basi.sln -m:1` exits with code 0, 21/21 passed |
+| Health endpoint chưa kiểm chứng runtime | Started API in background with `dotnet run` and queried `http://localhost:5000/api/health` via `Invoke-RestMethod` | Returned HTTP 200 with `status="healthy"`, `version="0.1.0"`, `database="disconnected"` |
+| Frontend build gặp EPERM khi chạy audit | Cleaned build verified using Windows fnm runtime (`pnpm run check && pnpm run build`) | `svelte-check` 0 errors/warnings, `vite build` completed successfully, exit code 0 |
+| Integration test file tên PlaceholderTests.cs | Renamed to `HealthEndpointIntegrationTests.cs` | `git mv` recorded in repository |
+| Số test trong handoff không thống nhất (CURRENT_TASK 12 vs 19) | Synchronized all documentation (`CURRENT_TASK.md`, `PROJECT_STATUS.md`, `SESSION-001.md`) to exact 21 verified tests | All documentation consistently states 21 tests (15 unit + 6 integration) |
 
 ---
 

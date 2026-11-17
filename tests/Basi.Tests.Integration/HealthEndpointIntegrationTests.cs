@@ -1,21 +1,31 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
 namespace Basi.Tests.Integration;
 
 /// <summary>
 /// Custom factory for integration tests.
-/// Sets ASPNETCORE_ENVIRONMENT=Testing so appsettings.Testing.json is loaded,
-/// providing a valid connection string without requiring a live PostgreSQL server.
+/// Explicitly configures an unreachable loopback port with Timeout=1 so that
+/// database connectivity failure is guaranteed and deterministic, and completes
+/// within the bounded timeout without hanging.
 /// </summary>
 public class IntegrationTestFactory : WebApplicationFactory<Program>
 {
-    protected override IHost CreateHost(IHostBuilder builder)
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        return base.CreateHost(builder);
+        builder.ConfigureAppConfiguration((context, config) =>
+        {
+            config.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1"
+            });
+        });
     }
 }
 
@@ -75,17 +85,24 @@ public class HealthEndpointIntegrationTests : IClassFixture<IntegrationTestFacto
     }
 
     [Fact]
-    public async Task HealthEndpoint_DatabaseField_IsConnectedOrDisconnected()
+    public async Task HealthEndpoint_DatabaseField_IsDisconnectedInOfflineEnvironment()
     {
         var client = _factory.CreateClient();
+        var stopwatch = Stopwatch.StartNew();
+
         var response = await client.GetAsync("/api/health");
+        stopwatch.Stop();
 
         var body = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         var dbStatus = doc.RootElement.GetProperty("database").GetString();
-        Assert.True(
-            dbStatus is "connected" or "disconnected",
-            $"Expected 'connected' or 'disconnected', got: '{dbStatus}'");
+
+        // Must strictly assert disconnected in offline environment
+        Assert.Equal("disconnected", dbStatus);
+
+        // Must verify bounded execution time
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+            $"Offline health check took {stopwatch.ElapsedMilliseconds}ms, exceeding 3s bounded threshold");
     }
 
     [Fact]
@@ -102,4 +119,3 @@ public class HealthEndpointIntegrationTests : IClassFixture<IntegrationTestFacto
             $"timestamp is not a valid ISO-8601 date: '{ts}'");
     }
 }
-

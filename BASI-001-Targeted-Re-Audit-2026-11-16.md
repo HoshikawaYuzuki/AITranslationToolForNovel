@@ -1,86 +1,98 @@
 # BASI-001 — Targeted Re-Audit
 
-## Scope
+Ngày cập nhật: 17/11/2026 (Asia/Saigon).
 
-This re-audit verifies only the issues identified in the previous BASI-001 audit. Node.js, pnpm, and Docker version differences between the Codex sandbox and Windows were explicitly excluded.
+## Phạm vi và repository
 
-## Repository status
+Chỉ kiểm tra BASI-001 và các lỗi từ báo cáo trước. Không đánh giá Task 2–6; loại trừ sai lệch phiên bản Node.js, pnpm và Docker giữa Windows và sandbox.
 
-- Branch: `basi-001-foundation`
-- HEAD: `fa70aea`
-- `git status`, working-tree diff, staged diff, and untracked-file check: clean at audit time.
-- No source code, database, migration, or dependency changes were made during the audit.
+- Branch: `basi-001-foundation`.
+- Commit được kiểm tra: `96be8fd`.
+- Khi kiểm tra: working tree sạch, không có staged/unstaged diff hoặc file chưa theo dõi.
+- Không sửa code, cấu hình, dependency, migration hoặc database trong audit.
+- File báo cáo này được ghi đè theo yêu cầu riêng của người dùng sau audit.
 
-## Issue re-check
+## Bảng đối chiếu
 
-| Previous issue | Current status | Evidence | Further action |
+| Lỗi trước đó | Trạng thái hiện tại | Bằng chứng | Cần làm thêm |
 |---|---|---|---|
-| `CONTRACTS.md` did not match `AiRequest.cs` | Fixed | Both now use `int MaxTokens = 2048` and `double Temperature = 0.7` | None |
-| `MASTER_PLAN.md` marked Task 1 as in progress | Fixed | Task 1 is now marked completed | None |
-| `CURRENT_TASK.md` reported 8 tests while 12 test cases exist | Fixed | Current task reports 12 tests | None |
-| README instructed an unavailable migration step | Partially fixed | Migration is now documented as a Task 2 concern | No migration is required for BASI-001 |
-| Handoff claimed 12/12 tests passed | Not verified | `dotnet test` still stops after test discovery without a summary | Resolve the test runner or run with a compatible .NET environment |
-| Health endpoint was not runtime-verified | Not verified | Code has a two-second DB timeout, but the test host does not complete | Execute a successful runtime request/test |
-| Development credential is hardcoded | Not fixed | `appsettings.Development.json` still contains `basi_dev_password` | Move to environment configuration or document the development-only decision |
-| Integration test was only a placeholder | Not fixed | `PlaceholderTests.cs` still contains `Assert.True(true)` | Add a real integration test or explicitly defer it |
-| Node/pnpm/Docker version mismatch | Excluded | Rechecked using the Windows fnm runtime as requested | Not counted as an issue |
+| Contract AiRequest không khớp code | Đã sửa | docs/CONTRACTS.md và src/Basi.Core/Models/AiRequest.cs thống nhất MaxTokens = 2048, Temperature = 0.7 | Không |
+| README yêu cầu migration chưa tồn tại | Đã sửa | README ghi migration thuộc Task 2 | Không yêu cầu migration cho BASI-001 |
+| MASTER_PLAN ghi trạng thái cũ | Đã sửa | Task 1 đã chuyển sang Completed | Việc nghiệm thu vẫn cần bằng chứng runtime |
+| Integration test chỉ Assert.True(true) | Đã thay thế ở mức implementation | tests/Basi.Tests.Integration/PlaceholderTests.cs chứa HealthEndpointIntegrationTests với 6 test qua WebApplicationFactory | Chạy thành công để xác nhận runtime |
+| Credential development chưa được giải thích | Đã làm rõ, còn lỗi hướng dẫn | appsettings.Development.json chú thích đây là credential development | Sửa hướng dẫn override cấu hình |
+| Test suite treo, chưa có kết quả | NOT VERIFIED | Chạy lại vẫn dừng sau thông báo 1 test files matched, không có tổng kết; đã ngắt thủ công | Điều tra test host; chưa đủ căn cứ quy lỗi cho PostgreSQL |
+| Health endpoint chưa kiểm chứng runtime | NOT VERIFIED | Request localhost:5000 bị từ chối quyền socket | Kiểm tra trong môi trường cho phép kết nối |
+| Docker Compose chưa validate | Đã xác minh cấu hình | Docker Windows chạy compose config --quiet, exit 0 | Runtime PostgreSQL chưa xác minh |
+| PostgreSQL connectivity | NOT VERIFIED | Docker CLI không kết nối được pipe dockerDesktopLinuxEngine | Kiểm tra Engine/DB trong môi trường đang hoạt động |
+| Số test trong handoff không thống nhất | Còn tồn tại | CURRENT_TASK.md:13 ghi 12; PROJECT_STATUS và SESSION ghi 19 | Đồng bộ số liệu, phân biệt test tồn tại với test đã chạy |
 
-## Build and test results
+## Vấn đề trong phần sửa mới
 
-### Backend
+### Medium — Hướng dẫn override cấu hình không khớp implementation
 
-Command:
+`src/Basi.Api/appsettings.Development.json:14-15` hướng dẫn dùng `appsettings.Local.json` hoặc biến `BASI__ConnectionStrings__DefaultConnection`.
 
-```text
-dotnet build Basi.sln --no-restore -m:1
-```
+`src/Basi.Api/Program.cs` không đăng ký nạp file Local hoặc prefix `BASI__`. Biến tương ứng với configuration mặc định là `ConnectionStrings__DefaultConnection`.
 
-Result: **PASS** — all 7 projects built with 0 warnings and 0 errors.
+Hướng sửa: dùng đúng biến mặc định, hoặc bổ sung đăng ký configuration phù hợp rồi kiểm chứng giá trị thực sự được đọc. Audit không tự sửa.
 
-### Backend tests
+### Medium — Test offline không chứng minh hành vi offline
 
-Command:
+`tests/Basi.Tests.Unit/HealthCheckTests.cs:65` có test `HealthEndpoint_DatabaseField_IsDisconnectedWhenNoDb`, nhưng assertion tại dòng 78 chấp nhận cả `connected` và `disconnected`.
 
-```text
-dotnet test tests\\Basi.Tests.Unit\\Basi.Tests.Unit.csproj --no-build -m:1
-```
+Hướng sửa: kiểm soát tình huống DB không khả dụng và assert chính xác `disconnected`; kiểm tra thời gian phản hồi có giới hạn.
 
-Result: **NOT VERIFIED**. The test runner stopped after:
+### Bằng chứng nguyên nhân test runner
 
-```text
-A total of 1 test files matched the specified pattern.
-```
+Chưa có bằng chứng độc lập xác nhận lời giải thích trong handoff rằng chuyển sang môi trường Testing đã giải quyết nguyên nhân test runner treo. Không suy ra nguyên nhân chỉ từ việc thêm appsettings.Testing.json.
 
-No final test summary was produced; the process was terminated manually.
+## Build và test đã chạy
 
-### Frontend using Windows fnm runtime
+| Kiểm tra | Kết quả thực tế |
+|---|---|
+| dotnet test Basi.sln --no-restore -m:1 -nr:false | Build API và unit-test project thành công; test runner không trả tổng kết. Ngắt thủ công, exit 1. Không xác nhận 19/19 hoặc toàn bộ solution test hoàn thành |
+| pnpm --dir src/frontend run check | PASS, 0 lỗi và 0 cảnh báo |
+| pnpm --dir src/frontend run build | Exit 1, EPERM mkdir tại .svelte-kit/output/client/_app/immutable; chưa chứng minh regression source |
+| Docker compose config --quiet | PASS, exit 0 |
+| Docker Engine | Không kết nối được pipe dockerDesktopLinuxEngine |
+| GET http://localhost:5000/api/health | Bị từ chối quyền socket trong môi trường audit; NOT VERIFIED |
 
-Runtime path:
+Frontend dùng thư mục Windows fnm:
 
 ```text
 C:\Users\pc\AppData\Roaming\fnm\node-versions\v26.13.1\installation
+Node.js: v26.13.1
+pnpm: 12.21.0
 ```
 
-Versions:
+Docker CLI dùng:
 
 ```text
-Node.js  v26.13.1
-npm      12.2.2
-pnpm     12.21.0
+C:\Users\pc\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe
 ```
 
-- `pnpm check`: **PASS**, 0 errors and 0 warnings.
-- `pnpm build`: **PASS**.
+Check và build frontend lần này chạy tuần tự mà vẫn gặp EPERM. Vì vậy, nhận định trước đây rằng EPERM chắc chắn do chạy song song là chưa đủ căn cứ. Không tính sai lệch phiên bản công cụ là lỗi dự án.
 
-## Architecture and regression review
+## Regression và kiến trúc
 
-No regression was found in the BASI-001 architecture. The Modular Monolith structure, provider abstraction, backend build, frontend checks, and frontend build remain intact. No Task 2–6 requirements were evaluated.
+Không phát hiện lỗi Critical hoặc regression kiến trúc BASI-001 qua các thay đổi đã đọc. Integration tests đã có implementation thực chất. Tuy nhiên, kết quả runtime còn giới hạn bởi test runner, quyền socket và lỗi ghi build artifact; không được coi các mục này là PASS.
 
-## Final verdict
+## Kết luận nghiệm thu
 
-- Fully fixed: 3 documentation/contract issues.
-- Partially fixed: migration documentation.
-- Remaining: test runtime verification, development credential handling, and placeholder integration test.
-- Critical acceptance gap: the test suite and health endpoint have not been independently verified at runtime.
+- 4 mục sửa hoàn chỉnh ở mức code/tài liệu: contract, README migration, trạng thái Master Plan, thay placeholder integration test.
+- Credential development đã được giải thích, nhưng hướng dẫn override còn sai.
+- Docker Compose đã được xác minh cấu hình; chưa xác minh PostgreSQL runtime.
+- Còn khoảng trống bằng chứng test suite và health endpoint; có hai vấn đề Medium cần sửa nêu trên.
 
-**BASI-001 is not fully accepted yet.** The project should not be formally advanced to BASI-002 until the test runner produces a real result and the health endpoint is verified successfully.
+**Verdict: INSUFFICIENT EVIDENCE.**
+
+**BASI-001 chưa được xác nhận hoàn thành đầy đủ. Chưa đủ cơ sở nghiệm thu chính thức để chuyển sang BASI-002.**
+
+Trước khi nghiệm thu:
+
+1. Hoàn tất chạy test suite và lưu kết quả thực tế; xác minh health endpoint/runtime trong môi trường phù hợp.
+2. Sửa hướng dẫn override configuration và kiểm chứng hiệu lực.
+3. Sửa assertion/test setup cho trường hợp database offline.
+4. Đồng bộ CURRENT_TASK với PROJECT_STATUS và SESSION; chỉ ghi Fully Verified khi có đủ bằng chứng.
+5. Xác minh lại frontend build sau khi giải quyết lỗi EPERM của môi trường.

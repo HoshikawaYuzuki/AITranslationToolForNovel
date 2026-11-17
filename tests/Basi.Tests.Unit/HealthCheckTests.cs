@@ -1,22 +1,31 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
 namespace Basi.Tests.Unit;
 
 /// <summary>
-/// Custom factory that sets ASPNETCORE_ENVIRONMENT=Testing so that
-/// appsettings.Testing.json is loaded (providing a valid but unreachable
-/// connection string). The health endpoint handles DB failure gracefully,
-/// so the test never hangs waiting for PostgreSQL.
+/// Custom factory for health check unit tests.
+/// Explicitly configures an unreachable loopback port with Timeout=1 so that
+/// database connectivity failure is guaranteed and deterministic, and completes
+/// within the bounded timeout without hanging.
 /// </summary>
 public class TestWebApplicationFactory : WebApplicationFactory<Program>
 {
-    protected override IHost CreateHost(IHostBuilder builder)
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        return base.CreateHost(builder);
+        builder.ConfigureAppConfiguration((context, config) =>
+        {
+            config.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1"
+            });
+        });
     }
 }
 
@@ -64,17 +73,24 @@ public class HealthCheckTests : IClassFixture<TestWebApplicationFactory>
     [Fact]
     public async Task HealthEndpoint_DatabaseField_IsDisconnectedWhenNoDb()
     {
-        // When PostgreSQL is not available (CI / local without Docker),
-        // the endpoint must still return 200 with database="disconnected".
+        // When PostgreSQL is not available (guaranteed by test factory config),
+        // the endpoint must return 200 with database="disconnected" within the bounded timeout.
         var client = _factory.CreateClient();
+        var stopwatch = Stopwatch.StartNew();
 
         var response = await client.GetAsync("/api/health");
+        stopwatch.Stop();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
         var json = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
 
-        // "disconnected" is the expected value when no DB is running.
-        // "connected" is also acceptable if someone runs tests with a live DB.
         var dbStatus = doc.RootElement.GetProperty("database").GetString();
-        Assert.True(dbStatus is "connected" or "disconnected");
+        Assert.Equal("disconnected", dbStatus);
+
+        // Verify bounded execution time (must complete within 3 seconds, well within timeout limits)
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+            $"Offline health check took {stopwatch.ElapsedMilliseconds}ms, exceeding the 3s bounded threshold");
     }
 }
