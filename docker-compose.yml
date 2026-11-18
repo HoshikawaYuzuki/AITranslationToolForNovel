@@ -3,7 +3,7 @@ services:
     image: postgres:17-alpine
     container_name: basi-postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_DB: basi_dev
       POSTGRES_USER: basi

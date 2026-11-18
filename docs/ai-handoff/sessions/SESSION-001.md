@@ -48,30 +48,27 @@
 
 ## 3. Build and Test Verification
 - **Backend Build (`dotnet build`)**: Succeeded (0 Warning(s), 0 Error(s)) across all 7 projects.
-- **Backend Tests (`dotnet test Basi.sln`)**: **21/21 tests PASS (verified at runtime, total duration ~3.5s):**
+- **Backend Tests (`dotnet test Basi.sln`)**: **24/24 tests PASS (verified at runtime, total duration ~4.7s):**
   - `MockAiProviderTests` (6 scenario tests): PASSED
   - `MockAiProviderEdgeCaseTests` (4 edge-case tests: null request, cancellation token, empty prompts, invalid enum): PASSED
-  - `ConfigurationOverrideTests` (2 tests: environment variable override, local JSON override): PASSED
+  - `ConfigurationOverrideTests` (5 tests on actual host composition: real environment variable provider, real temp local JSON, missing file tolerance, precedence policy Local JSON > Env Var, and precedence policy Env Var > Base AppSettings): PASSED
   - `HealthCheckTests` (3 tests via `WebApplicationFactory` — `ReturnsOk`, `ReturnsCorrectShape`, `DatabaseField_IsDisconnectedWhenNoDb` with deterministic offline port and duration < 3s): PASSED
   - `HealthEndpointIntegrationTests` (6 integration tests via `WebApplicationFactory` — HTTP 200, valid JSON, `status=healthy`, `version=0.1.0`, `database=disconnected` in offline environment with duration < 3s, ISO-8601 timestamp): PASSED
 - **Frontend Build (`pnpm build`)**: Succeeded with production bundle generated in `.svelte-kit/output` (exit code 0).
 - **Frontend Type & Syntax Check (`pnpm check`)**: Succeeded with 0 errors and 0 warnings.
-- **Health endpoint runtime verification**: Verified live via `dotnet run` + HTTP request to `http://localhost:5000/api/health` returning `{"status":"healthy","timestamp":"...","version":"0.1.0","database":"disconnected"}`.
+- **Health endpoint runtime verification**: Verified live via `dotnet run` + HTTP request to `http://localhost:5000/api/health` returning `{"status":"healthy","version":"0.1.0","database":"disconnected"}` when offline, and `database="connected"` when PostgreSQL container is online.
 
 ---
 
-## 4. Re-Audit Remediation (Updated 17/11/2026)
-Targeted re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` findings and resolutions:
+## 4. Re-Audit Remediation (Updated 18/11/2026)
+Targeted re-audit `BASI-001-Targeted-Re-Audit-2026-11-16.md` (18/11/2026 update) findings and resolutions:
 
 | Audit Finding | Resolution | Verification Evidence |
 |---|---|---|
-| Hướng dẫn override cấu hình không khớp implementation | Registered `appsettings.Local.json` in `Program.cs`; updated comment in `appsettings.Development.json` to state `ConnectionStrings__DefaultConnection` and `appsettings.Local.json`; added `ConfigurationOverrideTests.cs` | 2 new unit tests pass (`EnvironmentVariable_Overrides_DefaultConnectionString`, `LocalJsonFile_Overrides_BaseAppSettings`) |
-| Test offline chấp nhận cả connected lẫn disconnected | Configured unreachable loopback port (`54329`) with `Timeout=1` in `TestWebApplicationFactory` and `IntegrationTestFactory`; asserted strictly `Assert.Equal("disconnected", dbStatus)` and bounded duration `< 3s` | Tests pass in 73ms and 684ms respectively; deterministic offline assertion verified |
-| Test suite dừng sau discovery không có tổng kết | Configured deterministic offline test settings; whole solution test suite executes in ~3.5s without hang; added `--logger "console;verbosity=normal"` recommendation for real-time test progress | `dotnet test Basi.sln -m:1` exits with code 0, 21/21 passed |
-| Health endpoint chưa kiểm chứng runtime | Started API in background with `dotnet run` and queried `http://localhost:5000/api/health` via `Invoke-RestMethod` | Returned HTTP 200 with `status="healthy"`, `version="0.1.0"`, `database="disconnected"` |
-| Frontend build gặp EPERM khi chạy audit | Cleaned build verified using Windows fnm runtime (`pnpm run check && pnpm run build`) | `svelte-check` 0 errors/warnings, `vite build` completed successfully, exit code 0 |
-| Integration test file tên PlaceholderTests.cs | Renamed to `HealthEndpointIntegrationTests.cs` | `git mv` recorded in repository |
-| Số test trong handoff không thống nhất (CURRENT_TASK 12 vs 19) | Synchronized all documentation (`CURRENT_TASK.md`, `PROJECT_STATUS.md`, `SESSION-001.md`) to exact 21 verified tests | All documentation consistently states 21 tests (15 unit + 6 integration) |
+| R1 — Configuration testing on real providers & host composition | Rewrote `ConfigurationOverrideTests.cs` using `WebApplicationFactory<Program>` pointing to isolated temp content roots and process environment variables with strict `try/finally` cleanup and `[Collection("ConfigurationTests")]` (DisableParallelization=true) | 5 unit tests pass (`EnvironmentVariable_Overrides_BaseConfiguration_OnActualHost`, `LocalJsonFile_Overrides_BaseConfiguration_OnActualHost`, `MissingLocalJsonFile_AllowsSuccessfulStartup_OnActualHost`, plus 2 precedence tests). Verifies `BasiDbContext` received connection string without connecting to DB. |
+| R2 — Precedence policy definition & verification | Documented precedence policy in `appsettings.Development.json`: Local JSON > Command Line > Environment Variables (`ConnectionStrings__DefaultConnection`) > Development JSON > Base JSON; implemented 2 conflict tests proving this exact order on the real application host | `PrecedencePolicy_LocalJsonFile_TakesPrecedenceOverEnvironmentVariable_WhenBothPresent` and `PrecedencePolicy_EnvironmentVariable_TakesPrecedenceOverBaseAppSettings_WhenLocalJsonAbsent` both PASS. |
+| R3 — Offline DB test isolation | Documented assumption in `HealthCheckTests.cs` and `HealthEndpointIntegrationTests.cs`: uses an unassigned test port with `Timeout=1` to guarantee deterministic offline execution without requiring live infrastructure | Both test suites complete health endpoint checks in < 1s with `database="disconnected"`. |
+| R4 — Port 5433 documentation & handoff synchronization | `docker-compose.yml` host port mapped to 5433 (`5433:5432`) to prevent conflicts with native PostgreSQL on 5432; `appsettings.Development.json` connects to `127.0.0.1:5433`; documented in `README.md`, `CURRENT_TASK.md`, `PROJECT_STATUS.md`, and `SESSION-001.md` | All documentation synchronized to 24 tests (18 unit + 6 integration). |
 
 ---
 

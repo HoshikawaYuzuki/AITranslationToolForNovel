@@ -61,9 +61,11 @@ pnpm build      # Production build
 
 ```bash
 docker compose up -d          # Start all services
-docker compose up -d postgres # Start only PostgreSQL
+docker compose up -d postgres # Start only PostgreSQL (maps host port 5433 -> container 5432)
 docker compose down           # Stop all services
 ```
+
+> **Note on PostgreSQL Port:** `docker-compose.yml` publishes PostgreSQL to host port `5433` (`5433:5432`) to prevent conflicts with any native PostgreSQL running on host port `5432`. Backend development configuration connects to `Host=127.0.0.1;Port=5433`.
 
 ## Architecture Overview
 

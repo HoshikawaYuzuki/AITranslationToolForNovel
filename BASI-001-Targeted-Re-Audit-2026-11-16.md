@@ -1,98 +1,129 @@
-# BASI-001 — Targeted Re-Audit
+# BASI-001 — Kết quả nghiệm thu và bàn giao hoàn thiện
 
-Ngày cập nhật: 17/11/2026 (Asia/Saigon).
+Cập nhật: 18/11/2026 (Asia/Saigon).
 
-## Phạm vi và repository
+## 1. Phạm vi và kết luận
 
-Chỉ kiểm tra BASI-001 và các lỗi từ báo cáo trước. Không đánh giá Task 2–6; loại trừ sai lệch phiên bản Node.js, pnpm và Docker giữa Windows và sandbox.
+Chỉ BASI-001 — Foundation & Repository Bootstrap. Không triển khai hoặc đánh giá các giai đoạn khác.
+
+**Verdict hiện tại: ACCEPT WITH ISSUES.** Foundation đã có bằng chứng build, automated tests, frontend và kết nối PostgreSQL hoạt động. Còn khoảng trống automated test cho configuration và yêu cầu làm rõ precedence. Không có lỗi Critical/High đã xác nhận còn chặn hoạt động Foundation.
+
+Không được coi hạn chế socket, Docker pipe hoặc test runner trong sandbox Codex là lỗi code khi kết quả Windows đã chứng minh chạy được. Mock AI Provider là đúng kế hoạch, không thuộc phần cần sửa dưới đây.
+
+## 2. Baseline và thay đổi chưa commit
 
 - Branch: `basi-001-foundation`.
-- Commit được kiểm tra: `96be8fd`.
-- Khi kiểm tra: working tree sạch, không có staged/unstaged diff hoặc file chưa theo dõi.
-- Không sửa code, cấu hình, dependency, migration hoặc database trong audit.
-- File báo cáo này được ghi đè theo yêu cầu riêng của người dùng sau audit.
+- HEAD kiểm tra: `6094b53`.
+- Working tree ngày cập nhật có thay đổi: file báo cáo này, docker-compose.yml, src/Basi.Api/appsettings.Development.json.
+- Hai thay đổi cấu hình đã được người dùng yêu cầu: Docker publish 5433:5432; backend development dùng Host=127.0.0.1;Port=5433.
+- Không ghi đè các thay đổi này hoặc quay lại localhost:5432. PostgreSQL Windows 18 đang dùng cổng 5432; PostgreSQL Docker BASI 17 dùng cổng host 5433, cổng nội bộ 5432.
+- Trong lượt cập nhật này auditor chỉ sửa file báo cáo; không sửa tests, source, configuration hoặc database.
 
-## Bảng đối chiếu
+## 3. Bằng chứng đã xác nhận
 
-| Lỗi trước đó | Trạng thái hiện tại | Bằng chứng | Cần làm thêm |
-|---|---|---|---|
-| Contract AiRequest không khớp code | Đã sửa | docs/CONTRACTS.md và src/Basi.Core/Models/AiRequest.cs thống nhất MaxTokens = 2048, Temperature = 0.7 | Không |
-| README yêu cầu migration chưa tồn tại | Đã sửa | README ghi migration thuộc Task 2 | Không yêu cầu migration cho BASI-001 |
-| MASTER_PLAN ghi trạng thái cũ | Đã sửa | Task 1 đã chuyển sang Completed | Việc nghiệm thu vẫn cần bằng chứng runtime |
-| Integration test chỉ Assert.True(true) | Đã thay thế ở mức implementation | tests/Basi.Tests.Integration/PlaceholderTests.cs chứa HealthEndpointIntegrationTests với 6 test qua WebApplicationFactory | Chạy thành công để xác nhận runtime |
-| Credential development chưa được giải thích | Đã làm rõ, còn lỗi hướng dẫn | appsettings.Development.json chú thích đây là credential development | Sửa hướng dẫn override cấu hình |
-| Test suite treo, chưa có kết quả | NOT VERIFIED | Chạy lại vẫn dừng sau thông báo 1 test files matched, không có tổng kết; đã ngắt thủ công | Điều tra test host; chưa đủ căn cứ quy lỗi cho PostgreSQL |
-| Health endpoint chưa kiểm chứng runtime | NOT VERIFIED | Request localhost:5000 bị từ chối quyền socket | Kiểm tra trong môi trường cho phép kết nối |
-| Docker Compose chưa validate | Đã xác minh cấu hình | Docker Windows chạy compose config --quiet, exit 0 | Runtime PostgreSQL chưa xác minh |
-| PostgreSQL connectivity | NOT VERIFIED | Docker CLI không kết nối được pipe dockerDesktopLinuxEngine | Kiểm tra Engine/DB trong môi trường đang hoạt động |
-| Số test trong handoff không thống nhất | Còn tồn tại | CURRENT_TASK.md:13 ghi 12; PROJECT_STATUS và SESSION ghi 19 | Đồng bộ số liệu, phân biệt test tồn tại với test đã chạy |
+| Hạng mục | Kết quả | Nguồn và giới hạn |
+|---|---|---|
+| Backend solution build | PASS, 7 project, 0 warnings/errors | Auditor chạy dotnet build Basi.sln --no-restore -m:1 -nr:false tại commit 6094b53 |
+| Backend automated tests | PASS: 21/21, 15 unit + 6 integration, failed 0, skipped 0, exit 0 | Log PowerShell Windows người dùng cung cấp trong pwsh1.txt; HEAD 6094b53, lúc đó chỉ báo cáo bị modified. Không phải auditor tự chạy thành công trong sandbox |
+| Frontend check/build | PASS, check 0 errors/warnings, build exit 0 | Auditor chạy bằng Windows fnm Node v26.13.1, pnpm 12.21.0 |
+| Backend startup | PASS, listening localhost:5000 | Log Windows người dùng cung cấp |
+| Health khi DB offline | PASS, HTTP 200, database=disconnected, khoảng 1,15 giây | pwsh1.txt/pwsh2.txt của người dùng |
+| Docker Compose config | PASS, exit 0 | Đã validate cả cấu hình cổng mới |
+| PostgreSQL container | PASS, healthy và accepting connections | Log Windows người dùng cung cấp |
+| Database/user bên trong container | PASS, basi_dev / basi | SELECT current_database(), current_user() qua psql trong container |
+| Backend EF Core/Npgsql kết nối DB | PASS, HTTP 200, database=connected | Response Windows người dùng gửi sau đổi cổng, timestamp 2026-11-18T03:40:32.8936968Z; áp dụng working tree có cấu hình 5433, không phải baseline cấu hình 5432 |
+| Environment variable override | Đã có bằng chứng thủ công | Khi đặt ConnectionStrings__DefaultConnection với Host=::1, log backend chuyển đích sang ::1. Khi đó kết nối DB vẫn lỗi, nhưng biến override có hiệu lực |
 
-## Vấn đề trong phần sửa mới
+Không tuyên bố suite 21/21 đã được chạy lại sau đổi cổng: bằng chứng suite thuộc baseline 6094b53; health connected thuộc working tree đã đổi cổng. AI tiếp theo cần chạy lại suite sau phần sửa của mình.
 
-### Medium — Hướng dẫn override cấu hình không khớp implementation
+## 4. Các lỗi cũ đã đóng
 
-`src/Basi.Api/appsettings.Development.json:14-15` hướng dẫn dùng `appsettings.Local.json` hoặc biến `BASI__ConnectionStrings__DefaultConnection`.
+- Contract AiRequest khớp model (MaxTokens=2048, Temperature=0.7).
+- README không còn yêu cầu chạy migration chưa triển khai trong BASI-001.
+- Placeholder Assert.True(true) đã thay bằng 6 health integration tests qua WebApplicationFactory; file đã đổi tên HealthEndpointIntegrationTests.cs.
+- Offline test assert chính xác disconnected và giới hạn thời gian <3s.
+- Program.cs đã đăng ký appsettings.Local.json; hướng dẫn biến môi trường đã sửa thành ConnectionStrings__DefaultConnection.
+- Credential development được giải thích rõ; không có bằng chứng secret production bị lộ.
+- Handoff đã thống nhất số 21 test tại baseline. Số này phải cập nhật theo kết quả mới nếu tests thay đổi.
+- Frontend EPERM không tái hiện ở lượt build thành công gần nhất; không tiếp tục coi là lỗi source.
+- Backend kết nối DB đã thành công sau tách cổng; không cần reset password PostgreSQL Windows, xóa volume hay sửa database.
 
-`src/Basi.Api/Program.cs` không đăng ký nạp file Local hoặc prefix `BASI__`. Biến tương ứng với configuration mặc định là `ConnectionStrings__DefaultConnection`.
+## 5. Công việc còn lại giao AI sửa
 
-Hướng sửa: dùng đúng biến mặc định, hoặc bổ sung đăng ký configuration phù hợp rồi kiểm chứng giá trị thực sự được đọc. Audit không tự sửa.
+### R1 — Medium: Kiểm thử configuration đúng provider và host thực tế
 
-### Medium — Test offline không chứng minh hành vi offline
+**File chính:** tests/Basi.Tests.Unit/ConfigurationOverrideTests.cs; src/Basi.Api/Program.cs; cấu hình test liên quan.
 
-`tests/Basi.Tests.Unit/HealthCheckTests.cs:65` có test `HealthEndpoint_DatabaseField_IsDisconnectedWhenNoDb`, nhưng assertion tại dòng 78 chấp nhận cả `connected` và `disconnected`.
+**Vấn đề đã xác nhận:** Hai test EnvironmentVariable_Overrides_DefaultConnectionString và LocalJsonFile_Overrides_BaseAppSettings chỉ ghép dictionary bằng AddInMemoryCollection. Chúng không đọc biến môi trường thật, không đọc JSON thật, không kiểm tra composition của Program. Test có thể PASS dù bỏ đăng ký Local JSON trong Program.cs.
 
-Hướng sửa: kiểm soát tình huống DB không khả dụng và assert chính xác `disconnected`; kiểm tra thời gian phản hồi có giới hạn.
+Đây là thiếu sót về phạm vi kiểm thử, không phải phản đối mock và không chứng minh chức năng override hiện đang hỏng. Không liên quan MockAiProvider; tuyệt đối không thay bằng API AI thật.
 
-### Bằng chứng nguyên nhân test runner
+**Yêu cầu sửa:**
 
-Chưa có bằng chứng độc lập xác nhận lời giải thích trong handoff rằng chuyển sang môi trường Testing đã giải quyết nguyên nhân test runner treo. Không suy ra nguyên nhân chỉ từ việc thêm appsettings.Testing.json.
+1. Kiểm tra environment variable qua provider thật, gồm ánh xạ ConnectionStrings__DefaultConnection.
+2. Kiểm tra Local JSON qua file tạm/provider thật với tên và content root đúng cơ chế ứng dụng.
+3. Có kiểm chứng trên host ứng dụng thực tế hoặc composition configuration được dùng chung trực tiếp với Program; không chỉ dựng một ConfigurationBuilder độc lập rồi lặp lại thuật toán mong muốn.
+4. Xác minh configuration hiệu lực và connection string mà BasiDbContext nhận, không mở kết nối DB.
+5. Kiểm tra thiếu file Local không làm startup thất bại, và Local có thể override cấu hình nền theo policy được chọn.
+6. Test phải có ý nghĩa regression: loại bỏ đăng ký file Local hoặc làm sai cơ chế override phải khiến test tương ứng thất bại.
+7. Không ghi file Local vào thư mục cấu hình thật của developer. Dùng thư mục tạm cô lập, cleanup sau test. Nếu sửa process environment, lưu/khôi phục bằng try/finally và tránh chạy song song gây ảnh hưởng test khác. Không thay biến môi trường hệ thống.
+8. Dùng giá trị test không nhạy cảm; không yêu cầu AI API, database đang chạy hoặc dependency mới nếu công cụ hiện có đáp ứng.
 
-## Build và test đã chạy
+**Nghiệm thu R1:** Tests kiểm chứng provider và wiring thực tế, chạy được offline; kết quả không phụ thuộc Local JSON hoặc môi trường cá nhân ngoài fixture.
 
-| Kiểm tra | Kết quả thực tế |
-|---|---|
-| dotnet test Basi.sln --no-restore -m:1 -nr:false | Build API và unit-test project thành công; test runner không trả tổng kết. Ngắt thủ công, exit 1. Không xác nhận 19/19 hoặc toàn bộ solution test hoàn thành |
-| pnpm --dir src/frontend run check | PASS, 0 lỗi và 0 cảnh báo |
-| pnpm --dir src/frontend run build | Exit 1, EPERM mkdir tại .svelte-kit/output/client/_app/immutable; chưa chứng minh regression source |
-| Docker compose config --quiet | PASS, exit 0 |
-| Docker Engine | Không kết nối được pipe dockerDesktopLinuxEngine |
-| GET http://localhost:5000/api/health | Bị từ chối quyền socket trong môi trường audit; NOT VERIFIED |
+### R2 — Làm rõ policy: Thứ tự ưu tiên configuration
 
-Frontend dùng thư mục Windows fnm:
+**File chính:** src/Basi.Api/Program.cs:7–10, hướng dẫn development, tests configuration.
 
-```text
-C:\Users\pc\AppData\Roaming\fnm\node-versions\v26.13.1\installation
-Node.js: v26.13.1
-pnpm: 12.21.0
+**Hiện trạng:** CreateBuilder nạp provider mặc định; AddJsonFile(Local) được thêm sau nên Local có thể ghi đè environment variables và command-line arguments.
+
+Hành vi này không tự động là bug. Cần xác định và ghi rõ precedence thay vì báo lỗi chắc chắn.
+
+**Yêu cầu xử lý:**
+
+1. Kiểm tra yêu cầu hiện có trước khi chọn policy. Nếu không có yêu cầu khác, ưu tiên giữ hành vi hiện tại và ghi rõ Local được nạp sau các provider mặc định; không tự đổi policy chỉ để làm audit đẹp.
+2. Thêm test có đồng thời các nguồn cấu hình xung đột để chứng minh thứ tự đã chọn, qua wiring thực tế của ứng dụng.
+3. Nếu đề xuất đổi sang environment/command line ưu tiên hơn Local, trình bày rõ thay đổi hành vi và phạm vi; tuân thủ quy tắc phê duyệt contract/decision hiện có.
+4. Không được tuyên bố environment luôn thắng nếu Local vẫn được đăng ký sau và chứa cùng key.
+
+**Nghiệm thu R2:** Policy rõ ràng, tài liệu và test khớp implementation; developer biết giá trị nào được dùng khi có nhiều nguồn.
+
+### R3 — Low, cải thiện tùy chọn: Tính cô lập offline DB test
+
+Factory dùng cổng cố định 54329 và gọi nó là guaranteed/deterministic offline. Không thể bảo đảm cổng này trống trên mọi máy. Assertion disconnected hiện đã đúng; chưa có bằng chứng failure vì cổng bị chiếm.
+
+Không bắt buộc thêm hạ tầng hoặc test container. Có thể chỉ điều chỉnh mô tả để ghi rõ giả định, hoặc cải thiện fixture cô lập nếu cần. Không biến mục này thành blocker mới.
+
+### R4 — Bàn giao chính xác
+
+Sau sửa R1/R2:
+
+- Cập nhật CURRENT_TASK, PROJECT_STATUS, SESSION-001 bằng số test và lệnh thực sự chạy.
+- Phân biệt kết quả auditor tự chạy với kết quả người dùng cung cấp; ghi commit/working tree áp dụng.
+- Ghi cổng development 5433 và sự khác nhau với cổng nội bộ 5432 ở vị trí hướng dẫn phù hợp.
+- Không ghi all findings resolved nếu R1 chưa kiểm tra wiring thật hoặc R2 còn chưa chốt.
+
+## 6. Giới hạn phạm vi cho AI tiếp theo
+
+Chỉ hoàn thiện BASI-001 theo R1/R2 và cập nhật handoff liên quan. Không triển khai tính năng giai đoạn khác. Không gọi API AI trả phí, không sửa database/migration, không xóa volume, không reset Git, không tự commit/push/deploy. Giữ các thay đổi cổng đang có. Không sửa CONTRACTS.md hoặc DECISIONS.md khi chưa có phê duyệt theo quy tắc repository.
+
+Không cần thay stack, đổi SDK, viết lại Mock Provider hoặc xây thêm hạ tầng chỉ để xử lý giới hạn sandbox. Nếu sandbox không chạy được test, ghi NOT VERIFIED trong môi trường đó và dùng bằng chứng Windows đúng revision; không tự báo PASS.
+
+## 7. Kiểm tra sau khi sửa
+
+Chạy tuần tự, không restore/cài thêm dependency tự động:
+
+```powershell
+dotnet build Basi.sln --no-restore -m:1 -nr:false
+dotnet test Basi.sln --no-restore -m:1 -nr:false --logger "console;verbosity=normal"
 ```
 
-Docker CLI dùng:
+Chạy frontend check/build khi thay đổi liên quan frontend hoặc cần xác minh toàn bộ Foundation; dùng Windows fnm đã thống nhất, không coi phiên bản sandbox khác là lỗi dự án.
 
-```text
-C:\Users\pc\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe
-```
+Nếu thay đổi startup/configuration wiring, xác minh lại health trên Windows với DB offline và online bằng cấu hình development 5433. Không tự khởi động/dừng/xóa database ngoài phạm vi được phép; có thể nhờ người dùng thực hiện kiểm tra runtime.
 
-Check và build frontend lần này chạy tuần tự mà vẫn gặp EPERM. Vì vậy, nhận định trước đây rằng EPERM chắc chắn do chạy song song là chưa đủ căn cứ. Không tính sai lệch phiên bản công cụ là lỗi dự án.
+## 8. Quyết định hiện tại
 
-## Regression và kiến trúc
+**BASI-001: ACCEPT WITH ISSUES.** Foundation hoạt động theo bằng chứng build/test/runtime hiện có. Phần sửa còn lại là làm automated tests configuration phản ánh đúng cơ chế thật và làm rõ precedence; không phải sửa một lỗi kết nối DB còn tồn tại.
 
-Không phát hiện lỗi Critical hoặc regression kiến trúc BASI-001 qua các thay đổi đã đọc. Integration tests đã có implementation thực chất. Tuy nhiên, kết quả runtime còn giới hạn bởi test runner, quyền socket và lỗi ghi build artifact; không được coi các mục này là PASS.
-
-## Kết luận nghiệm thu
-
-- 4 mục sửa hoàn chỉnh ở mức code/tài liệu: contract, README migration, trạng thái Master Plan, thay placeholder integration test.
-- Credential development đã được giải thích, nhưng hướng dẫn override còn sai.
-- Docker Compose đã được xác minh cấu hình; chưa xác minh PostgreSQL runtime.
-- Còn khoảng trống bằng chứng test suite và health endpoint; có hai vấn đề Medium cần sửa nêu trên.
-
-**Verdict: INSUFFICIENT EVIDENCE.**
-
-**BASI-001 chưa được xác nhận hoàn thành đầy đủ. Chưa đủ cơ sở nghiệm thu chính thức để chuyển sang BASI-002.**
-
-Trước khi nghiệm thu:
-
-1. Hoàn tất chạy test suite và lưu kết quả thực tế; xác minh health endpoint/runtime trong môi trường phù hợp.
-2. Sửa hướng dẫn override configuration và kiểm chứng hiệu lực.
-3. Sửa assertion/test setup cho trường hợp database offline.
-4. Đồng bộ CURRENT_TASK với PROJECT_STATUS và SESSION; chỉ ghi Fully Verified khi có đủ bằng chứng.
-5. Xác minh lại frontend build sau khi giải quyết lỗi EPERM của môi trường.
+Sau khi R1/R2 đạt tiêu chí và build/test lại thành công, có thể xem xét nâng nghiệm thu BASI-001 lên ACCEPT. Báo cáo này không đưa ra quyết định về bất kỳ giai đoạn nào khác.
