@@ -99,3 +99,9 @@ lcov.info
 *.bak
 *.orig
 .cache/
+
+# =========================
+# Agent & Documentation
+# =========================
+.agents/
+.agent/
