@@ -4,12 +4,13 @@ using Basi.Core.Models;
 namespace Basi.Module.Translation.Services;
 
 /// <summary>
-/// Result of parsing a raw text document, including full preserved raw text and individual segments.
+/// Result of parsing a raw text document, including preserved normalized raw text and individual segments.
 /// </summary>
 public sealed record TxtParseResult(string RawContent, IReadOnlyList<Segment> Segments);
 
 /// <summary>
 /// Parses a raw TXT file into a preserved raw string and an ordered list of <see cref="Segment"/> records.
+/// Enforces strict character validation (no silent U+FFFD replacement, no NUL characters, no unprintable control characters).
 /// </summary>
 public sealed class TxtParser
 {
@@ -17,7 +18,7 @@ public sealed class TxtParser
 
     static TxtParser()
     {
-        // Register CJK and other international code pages (Shift-JIS, GB18030, EUC-KR, Windows-125x)
+        // Register CJK and other international code pages (Shift-JIS, GB18030, EUC-KR, Big5)
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
@@ -39,23 +40,21 @@ public sealed class TxtParser
         if (bytes.Length == 0)
             throw new InvalidOperationException("The uploaded file is empty.");
 
-        // 1. Try BOM detection first. UTF-16 with BOM contains 50% null bytes for ASCII and is legitimate.
-        string? text = TryDetectBom(bytes);
+        // Decode with strict validation (throws on malformed bytes, no silent U+FFFD replacement)
+        var text = DetectAndDecode(bytes, sourceLanguageHint);
 
-        // 2. If no BOM, check for binary content (null bytes check)
-        if (text is null)
-        {
-            int nullCount = 0;
-            int checkLimit = Math.Min(bytes.Length, 8192);
-            for (int i = 0; i < checkLimit; i++)
-            {
-                if (bytes[i] == 0) nullCount++;
-            }
-            if (nullCount > 0)
-                throw new ArgumentException("The file appears to be binary, not plain text.");
+        // Validate decoded characters across ALL code paths:
+        // 1. Reject NUL characters
+        if (text.Contains('\0'))
+            throw new ArgumentException("The file contains invalid null characters (NUL).");
 
-            text = DetectAndDecode(bytes, sourceLanguageHint);
-        }
+        // 2. Reject unprintable control characters (only \r, \n, \t are permitted)
+        if (text.Any(c => char.IsControl(c) && c != '\r' && c != '\n' && c != '\t'))
+            throw new ArgumentException("The file contains invalid control characters.");
+
+        // 3. Reject any replacement characters (U+FFFD)
+        if (text.Contains('\uFFFD'))
+            throw new ArgumentException("The file contains malformed or unmappable characters.");
 
         var normalized = text.Replace("\r\n", "\n").Replace("\r", "\n");
         var segments = SplitIntoSegments(normalized, novelId);
@@ -72,43 +71,71 @@ public sealed class TxtParser
     }
 
     // ------------------------------------------------------------------ //
-    //  Encoding detection                                                  //
+    //  Strict Encoding Detection                                          //
     // ------------------------------------------------------------------ //
-
-    internal static string? TryDetectBom(byte[] bytes)
-    {
-        // UTF-8 BOM
-        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
-
-        // UTF-16 LE BOM
-        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
-            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
-
-        // UTF-16 BE BOM
-        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
-            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
-
-        return null;
-    }
 
     internal static string DetectAndDecode(byte[] bytes, string? sourceLanguageHint = null)
     {
-        var bomText = TryDetectBom(bytes);
-        if (bomText != null) return bomText;
+        // 1. BOM-based detection with STRICT decoder (throw on invalid bytes)
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        {
+            var strictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            try
+            {
+                return strictUtf8.GetString(bytes, 3, bytes.Length - 3);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ArgumentException("The file contains malformed UTF-8 byte sequences.");
+            }
+        }
 
-        // Try UTF-8 strict (no fallback chars)
-        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+        {
+            var remaining = bytes.Length - 2;
+            if (remaining % 2 != 0)
+                throw new ArgumentException("Invalid UTF-16 LE stream: payload byte count must be even.");
+
+            var strictLe = new UnicodeEncoding(bigEndian: false, byteOrderMark: false, throwOnInvalidBytes: true);
+            try
+            {
+                return strictLe.GetString(bytes, 2, remaining);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ArgumentException("The file contains malformed UTF-16 LE byte sequences.");
+            }
+        }
+
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+        {
+            var remaining = bytes.Length - 2;
+            if (remaining % 2 != 0)
+                throw new ArgumentException("Invalid UTF-16 BE stream: payload byte count must be even.");
+
+            var strictBe = new UnicodeEncoding(bigEndian: true, byteOrderMark: false, throwOnInvalidBytes: true);
+            try
+            {
+                return strictBe.GetString(bytes, 2, remaining);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ArgumentException("The file contains malformed UTF-16 BE byte sequences.");
+            }
+        }
+
+        // 2. Try UTF-8 strict (no fallback chars)
+        var utf8Strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
         try
         {
-            return utf8.GetString(bytes);
+            return utf8Strict.GetString(bytes);
         }
         catch (DecoderFallbackException)
         {
-            // Not valid UTF-8, proceed to CJK detection
+            // Not valid UTF-8, proceed to CJK candidates
         }
 
-        // Determine candidate order based on language hint
+        // 3. Heuristic: try common CJK encodings with strict exception fallback
         var candidates = GetEncodingCandidates(sourceLanguageHint);
 
         foreach (var name in candidates)
@@ -118,7 +145,7 @@ public sealed class TxtParser
                 var enc = Encoding.GetEncoding(name, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
                 var decoded = enc.GetString(bytes);
 
-                // Reject if decoded text contains unprintable control characters (except common whitespace)
+                // Reject if decoded text contains unprintable control characters
                 if (decoded.Any(c => char.IsControl(c) && c != '\r' && c != '\n' && c != '\t'))
                     continue;
 
@@ -132,8 +159,8 @@ public sealed class TxtParser
             }
         }
 
-        // Final fallback: UTF-8 with replacement
-        return Encoding.UTF8.GetString(bytes);
+        // 4. Reject unsupported or malformed encoding completely (no silent replacement)
+        throw new ArgumentException("Unable to decode file. Unsupported encoding or malformed byte sequences.");
     }
 
     private static string[] GetEncodingCandidates(string? sourceLanguageHint)

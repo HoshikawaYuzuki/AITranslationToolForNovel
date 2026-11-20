@@ -199,7 +199,75 @@ public class TxtParserTests
         Array.Fill(binary, (byte)0); // All null bytes
 
         var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(binary, TestNovelId));
-        Assert.Contains("binary", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("null", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  R2 & R3 Regression Tests: Null bytes, Control chars, Malformed bytes //
+    // ------------------------------------------------------------------ //
+
+    [Fact]
+    public void Parse_Utf8BomWithNullByte_ThrowsArgumentException()
+    {
+        // [239, 187, 191, 65, 0, 66] — UTF8 BOM + 'A' + NUL + 'B'
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'A', 0x00, (byte)'B' };
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
+        Assert.Contains("null", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_NullByteAfter8192Bytes_ThrowsArgumentException()
+    {
+        // 8192 bytes of ASCII 'A' followed by NUL and 'B'
+        var bytes = new byte[8194];
+        Array.Fill(bytes, (byte)'A', 0, 8192);
+        bytes[8192] = 0x00;
+        bytes[8193] = (byte)'B';
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
+        Assert.Contains("null", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_UnprintableControlCharacters_ThrowsArgumentException()
+    {
+        // ASCII with BEL character (0x07)
+        var text = "Hello\x07World";
+        var bytes = Encoding.UTF8.GetBytes(text);
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
+        Assert.Contains("control", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_Utf16WithNullCharacter_ThrowsArgumentException()
+    {
+        // UTF-16 containing an actual U+0000 character
+        var text = "Valid\0Content";
+        var bytes = new byte[] { 0xFF, 0xFE }.Concat(Encoding.Unicode.GetBytes(text)).ToArray();
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
+        Assert.Contains("null", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_Utf8BomWithMalformedBytes_ThrowsArgumentException()
+    {
+        // [239, 187, 191, 65, 255, 66] — UTF8 BOM + 'A' + 0xFF + 'B' (0xFF is invalid UTF-8)
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'A', 0xFF, (byte)'B' };
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
+        Assert.Contains("malformed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_Utf16OddLengthPayload_ThrowsArgumentException()
+    {
+        // UTF-16 LE BOM (2 bytes) + 1 single byte payload (odd byte length)
+        var bytes = new byte[] { 0xFF, 0xFE, 0x41 };
+
+        Assert.Throws<ArgumentException>(() => _parser.Parse(bytes, TestNovelId));
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using Basi.Api.Data;
 using Basi.Core.Models;
 using Basi.Module.Identity;
 using Basi.Module.Identity.Models;
+using Basi.Module.Identity.Services;
 using Basi.Module.Translation;
 using Basi.Module.Translation.Services;
 using Basi.Module.StoryMemory;
@@ -11,6 +12,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -71,32 +73,15 @@ builder.Services.AddAuthentication(options =>
     options.CallbackPath = "/api/auth/callback";
     options.SaveTokens = false; // tokens stay in RAM only, never persisted
 
-    // Provision user immediately upon receiving OAuth ticket
+    // Strictly provision user upon receiving OAuth ticket.
+    // If user creation or login association fails, the ticket is failed.
     options.Events.OnTicketReceived = async ticketCtx =>
     {
         var userManager = ticketCtx.HttpContext.RequestServices.GetRequiredService<UserManager<ApplicationUser>>();
-        var googleId = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-        var email = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
-        var name = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
-
-        if (!string.IsNullOrEmpty(googleId) && !string.IsNullOrEmpty(email))
+        var result = await OAuthUserProvisioner.ProvisionGoogleUserAsync(ticketCtx.Principal, userManager);
+        if (!result.Succeeded)
         {
-            var user = await userManager.FindByLoginAsync("Google", googleId);
-            if (user == null)
-            {
-                user = new ApplicationUser
-                {
-                    UserName = email,
-                    Email = email,
-                    DisplayName = name ?? email,
-                    EmailConfirmed = true,
-                };
-                var createResult = await userManager.CreateAsync(user);
-                if (createResult.Succeeded)
-                {
-                    await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
-                }
-            }
+            ticketCtx.Fail(result.ErrorMessage!);
         }
     };
 });
@@ -185,7 +170,7 @@ app.MapGet("/api/auth/login", (HttpContext ctx, string? returnUrl) =>
         [GoogleDefaults.AuthenticationScheme]);
 });
 
-// GET /api/auth/me — returns current authenticated user information
+// GET /api/auth/me — purely reads current authenticated user information from store
 app.MapGet("/api/auth/me", async (HttpContext ctx, UserManager<ApplicationUser> userManager) =>
 {
     if (ctx.User.Identity?.IsAuthenticated != true)
@@ -197,34 +182,7 @@ app.MapGet("/api/auth/me", async (HttpContext ctx, UserManager<ApplicationUser> 
 
     var user = await userManager.FindByLoginAsync("Google", googleId);
     if (user is null)
-    {
-        // Safe fallback in case ticket received hook was bypassed (e.g. test schemes)
-        var email = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
-        var name = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
-        if (email is not null)
-        {
-            user = new ApplicationUser
-            {
-                UserName = email,
-                Email = email,
-                DisplayName = name ?? email,
-                EmailConfirmed = true,
-            };
-            var createResult = await userManager.CreateAsync(user);
-            if (createResult.Succeeded)
-            {
-                await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
-            }
-            else
-            {
-                return Results.Problem("Failed to create user account.");
-            }
-        }
-        else
-        {
-            return Results.Unauthorized();
-        }
-    }
+        return Results.Unauthorized();
 
     return Results.Ok(new
     {
@@ -282,35 +240,7 @@ app.MapPost("/api/novels/upload", async (
     if (googleId is null) return Results.Unauthorized();
 
     var appUser = await userManager.FindByLoginAsync("Google", googleId);
-    if (appUser is null)
-    {
-        // Fallback provisioning if not present
-        var email = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
-        var name = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
-        if (email is not null)
-        {
-            appUser = new ApplicationUser
-            {
-                UserName = email,
-                Email = email,
-                DisplayName = name ?? email,
-                EmailConfirmed = true,
-            };
-            var createRes = await userManager.CreateAsync(appUser);
-            if (createRes.Succeeded)
-            {
-                await userManager.AddLoginAsync(appUser, new UserLoginInfo("Google", googleId, "Google"));
-            }
-            else
-            {
-                return Results.Unauthorized();
-            }
-        }
-        else
-        {
-            return Results.Unauthorized();
-        }
-    }
+    if (appUser is null) return Results.Unauthorized();
 
     // 3. Form content-type check
     if (!ctx.Request.HasFormContentType)
@@ -352,7 +282,7 @@ app.MapPost("/api/novels/upload", async (
         bytes = ms.ToArray();
     }
 
-    // 9. Parse and persist
+    // 9. Parse and persist (with strict validation: no NUL, no unprintable controls, no malformed bytes)
     try
     {
         var novelId = Guid.NewGuid();
@@ -392,6 +322,30 @@ app.MapPost("/api/novels/upload", async (
 }).RequireAuthorization();
 
 // ======================================================================
+// Test Support Endpoints (Testing environment only)
+// ======================================================================
+
+if (app.Environment.IsEnvironment("Testing"))
+{
+    // Test-only endpoint to issue real authentication cookie for integration testing
+    app.MapPost("/api/test/signin", async (HttpContext ctx, TestSignInRequest req, UserManager<ApplicationUser> userManager) =>
+    {
+        var user = await userManager.FindByLoginAsync("Google", req.GoogleId);
+        if (user == null) return Results.NotFound("Test user not found");
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, req.GoogleId),
+            new Claim(ClaimTypes.Email, user.Email ?? ""),
+            new Claim(ClaimTypes.Name, user.DisplayName ?? "")
+        };
+        var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+        await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
+        return Results.Ok(new { message = "Signed in" });
+    });
+}
+
+// ======================================================================
 // Health Endpoint
 // ======================================================================
 
@@ -423,3 +377,5 @@ app.Run();
 
 // Make the implicit Program class accessible for integration tests
 public partial class Program { }
+
+public record TestSignInRequest(string GoogleId);

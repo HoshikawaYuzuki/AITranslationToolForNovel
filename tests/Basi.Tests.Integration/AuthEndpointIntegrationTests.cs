@@ -5,9 +5,13 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +21,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Basi.Api.Data;
 using Basi.Core.Models;
+using Basi.Module.Identity.Models;
 
 namespace Basi.Tests.Integration;
 
@@ -26,6 +31,10 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
     public const string TestGoogleId = "test-google-id-123";
     public const string TestEmail = "testuser@example.com";
     public const string TestName = "Test User";
+
+    public const string UserIdHeader = "X-Test-UserId";
+    public const string UserEmailHeader = "X-Test-Email";
+    public const string UserNameHeader = "X-Test-Name";
 
     public TestAuthHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
@@ -37,11 +46,15 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        var googleId = Request.Headers.TryGetValue(UserIdHeader, out var uid) ? uid.ToString() : TestGoogleId;
+        var email = Request.Headers.TryGetValue(UserEmailHeader, out var uemail) ? uemail.ToString() : TestEmail;
+        var name = Request.Headers.TryGetValue(UserNameHeader, out var uname) ? uname.ToString() : TestName;
+
         var claims = new[]
         {
-            new Claim(ClaimTypes.NameIdentifier, TestGoogleId),
-            new Claim(ClaimTypes.Email, TestEmail),
-            new Claim(ClaimTypes.Name, TestName)
+            new Claim(ClaimTypes.NameIdentifier, googleId),
+            new Claim(ClaimTypes.Email, email),
+            new Claim(ClaimTypes.Name, name)
         };
         var identity = new ClaimsIdentity(claims, SchemeName);
         var principal = new ClaimsPrincipal(identity);
@@ -98,6 +111,34 @@ public class AuthTestFactory : WebApplicationFactory<Program>
                 .AddScheme<AuthenticationSchemeOptions, TestAuthHandler>(TestAuthHandler.SchemeName, _ => { });
             }
         });
+    }
+
+    public async Task<ApplicationUser> SeedUserAsync(
+        string googleId = TestAuthHandler.TestGoogleId,
+        string email = TestAuthHandler.TestEmail,
+        string displayName = TestAuthHandler.TestName)
+    {
+        using var scope = Services.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var existing = await userManager.FindByLoginAsync("Google", googleId);
+        if (existing != null) return existing;
+
+        var user = new ApplicationUser
+        {
+            UserName = email,
+            Email = email,
+            DisplayName = displayName,
+            EmailConfirmed = true,
+        };
+        var createResult = await userManager.CreateAsync(user);
+        if (!createResult.Succeeded)
+            throw new InvalidOperationException($"Failed to seed test user: {string.Join(", ", createResult.Errors.Select(e => e.Description))}");
+
+        var loginResult = await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
+        if (!loginResult.Succeeded)
+            throw new InvalidOperationException($"Failed to add login for test user: {string.Join(", ", loginResult.Errors.Select(e => e.Description))}");
+
+        return user;
     }
 
     public async Task<string> FetchAntiforgeryTokenAsync(HttpClient client)
@@ -162,7 +203,7 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
     }
 
     // ------------------------------------------------------------------ //
-    //  Open Redirect protection tests (F07)                              //
+    //  Open Redirect protection tests (F07 / R4)                         //
     // ------------------------------------------------------------------ //
 
     [Theory]
@@ -181,9 +222,19 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
 
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
         var location = response.Headers.Location?.ToString() ?? string.Empty;
-        // The Google OAuth state redirect_uri parameter should fallback to "/"
         Assert.Contains("redirect_uri", location);
         Assert.DoesNotContain(evilUrl, location);
+
+        // Decrypt the state parameter using GoogleOptions.StateDataFormat to verify fallback to "/"
+        var uri = new Uri(location);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+        var state = query["state"];
+        Assert.NotNull(state);
+
+        var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
+        var properties = googleOptions.StateDataFormat.Unprotect(state);
+        Assert.NotNull(properties);
+        Assert.Equal("/", properties.RedirectUri);
     }
 
     [Fact]
@@ -200,21 +251,80 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
         var location = response.Headers.Location?.ToString() ?? string.Empty;
         Assert.StartsWith("https://accounts.google.com", location);
-        Assert.Contains("state=", location);
+
+        // Decrypt the state parameter using GoogleOptions.StateDataFormat to verify preserved path
+        var uri = new Uri(location);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+        var state = query["state"];
+        Assert.NotNull(state);
+
+        var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
+        var properties = googleOptions.StateDataFormat.Unprotect(state);
+        Assert.NotNull(properties);
+        Assert.Equal(validPath, properties.RedirectUri);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Real Cookie Authentication & Logout Invalidation test (R4)         //
+    // ------------------------------------------------------------------ //
+
+    [Fact]
+    public async Task LogoutEndpoint_WithRealCookie_ClearsAuthSession_AndSubsequentMeReturns401()
+    {
+        var factory = new AuthTestFactory { EnableTestAuth = false };
+        await factory.SeedUserAsync("cookie-test-user-id", "cookieuser@example.com", "Cookie User");
+
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        // 1. Sign in via test-support endpoint with real Cookie scheme
+        var signinRes = await client.PostAsJsonAsync("/api/test/signin", new { GoogleId = "cookie-test-user-id" });
+        Assert.Equal(HttpStatusCode.OK, signinRes.StatusCode);
+
+        // 2. Access /api/auth/me with the real cookie -> returns 200 OK
+        var meRes = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.OK, meRes.StatusCode);
+        var meJson = await meRes.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(meJson);
+        Assert.Equal("cookieuser@example.com", doc.RootElement.GetProperty("email").GetString());
+
+        // 3. Fetch antiforgery token
+        var token = await factory.FetchAntiforgeryTokenAsync(client);
+
+        // 4. Logout with antiforgery token
+        var logoutRequest = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
+        logoutRequest.Headers.Add("X-XSRF-TOKEN", token);
+        var logoutRes = await client.SendAsync(logoutRequest);
+        Assert.Equal(HttpStatusCode.OK, logoutRes.StatusCode);
+
+        // 5. Subsequent request to /api/auth/me MUST return 401 Unauthorized (cookie invalidated)
+        var meAfterLogoutRes = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, meAfterLogoutRes.StatusCode);
     }
 }
 
-public class AuthenticatedFlowIntegrationTests
+public class AuthenticatedFlowIntegrationTests : IAsyncLifetime
 {
     private readonly AuthTestFactory _factory;
+    private ApplicationUser _testUser = null!;
 
     public AuthenticatedFlowIntegrationTests()
     {
         _factory = new AuthTestFactory { EnableTestAuth = true };
     }
 
+    public async Task InitializeAsync()
+    {
+        _testUser = await _factory.SeedUserAsync();
+    }
+
+    public Task DisposeAsync() => Task.CompletedTask;
+
     [Fact]
-    public async Task MeEndpoint_WithAuth_CreatesAndReturnsUser()
+    public async Task MeEndpoint_WithAuth_ReturnsUserFromStore()
     {
         var client = _factory.CreateClient();
 
@@ -228,7 +338,36 @@ public class AuthenticatedFlowIntegrationTests
         Assert.Equal(TestAuthHandler.TestEmail, root.GetProperty("email").GetString());
         Assert.Equal(TestAuthHandler.TestName, root.GetProperty("displayName").GetString());
         Assert.True(root.TryGetProperty("id", out var idProp));
-        Assert.NotEqual(Guid.Empty, idProp.GetGuid());
+        Assert.Equal(_testUser.Id, idProp.GetGuid());
+    }
+
+    [Fact]
+    public async Task MeEndpoint_WhenUserNotInDatabase_Returns401()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add(TestAuthHandler.UserIdHeader, "unregistered-google-id");
+
+        var response = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadEndpoint_WhenUserNotInDatabase_Returns401()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add(TestAuthHandler.UserIdHeader, "unregistered-google-id");
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("Valid Title"), "title");
+        form.Add(new StringContent("ja"), "sourceLanguage");
+        form.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("Some text")), "file", "book.txt");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = form };
+        request.Headers.Add("X-XSRF-TOKEN", token);
+
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     // ------------------------------------------------------------------ //
@@ -408,7 +547,7 @@ public class AuthenticatedFlowIntegrationTests
     }
 
     // ------------------------------------------------------------------ //
-    //  Full Upload Flow & Persistence (F03, F06, T07, T13)                //
+    //  Full Upload Flow & Persistence (F03, F06, T07, T13, R4)            //
     // ------------------------------------------------------------------ //
 
     [Fact]
@@ -449,6 +588,7 @@ public class AuthenticatedFlowIntegrationTests
             .FirstOrDefaultAsync(n => n.Id == novelId);
 
         Assert.NotNull(persistedNovel);
+        Assert.Equal(_testUser.Id, persistedNovel.OwnerId);
         Assert.Equal("My Test Novel", persistedNovel.Title);
         Assert.Equal("ja", persistedNovel.SourceLanguage);
         Assert.Equal(txtContent, persistedNovel.RawContent);
@@ -460,6 +600,122 @@ public class AuthenticatedFlowIntegrationTests
         Assert.StartsWith(novelId.ToString("N"), sortedSegments[0].StableId);
         Assert.Equal(1, sortedSegments[1].Order);
         Assert.Equal("It was a dark and stormy night.", sortedSegments[1].Content);
+    }
+
+    [Fact]
+    public async Task UploadEndpoint_MultipleUsers_EnforcesOwnerSeparationAndPersistsCorrectOwnerId()
+    {
+        var userA = await _factory.SeedUserAsync("google-user-a", "usera@example.com", "User A");
+        var userB = await _factory.SeedUserAsync("google-user-b", "userb@example.com", "User B");
+
+        Assert.NotEqual(userA.Id, userB.Id);
+
+        // Upload as User A
+        var clientA = _factory.CreateClient();
+        clientA.DefaultRequestHeaders.Add(TestAuthHandler.UserIdHeader, "google-user-a");
+        var tokenA = await _factory.FetchAntiforgeryTokenAsync(clientA);
+
+        using var formA = new MultipartFormDataContent();
+        formA.Add(new StringContent("Novel of User A"), "title");
+        formA.Add(new StringContent("ja"), "sourceLanguage");
+        formA.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("Content from User A")), "file", "novel_a.txt");
+
+        var requestA = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = formA };
+        requestA.Headers.Add("X-XSRF-TOKEN", tokenA);
+        var responseA = await clientA.SendAsync(requestA);
+        Assert.Equal(HttpStatusCode.OK, responseA.StatusCode);
+
+        var docA = JsonDocument.Parse(await responseA.Content.ReadAsStringAsync());
+        var novelIdA = docA.RootElement.GetProperty("novelId").GetGuid();
+
+        // Upload as User B
+        var clientB = _factory.CreateClient();
+        clientB.DefaultRequestHeaders.Add(TestAuthHandler.UserIdHeader, "google-user-b");
+        var tokenB = await _factory.FetchAntiforgeryTokenAsync(clientB);
+
+        using var formB = new MultipartFormDataContent();
+        formB.Add(new StringContent("Novel of User B"), "title");
+        formB.Add(new StringContent("ja"), "sourceLanguage");
+        formB.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("Content from User B")), "file", "novel_b.txt");
+
+        var requestB = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = formB };
+        requestB.Headers.Add("X-XSRF-TOKEN", tokenB);
+        var responseB = await clientB.SendAsync(requestB);
+        Assert.Equal(HttpStatusCode.OK, responseB.StatusCode);
+
+        var docB = JsonDocument.Parse(await responseB.Content.ReadAsStringAsync());
+        var novelIdB = docB.RootElement.GetProperty("novelId").GetGuid();
+
+        // Verify in DB that novelIdA belongs to userA and novelIdB belongs to userB
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+
+        var novelA = await db.Novels.FindAsync(novelIdA);
+        var novelB = await db.Novels.FindAsync(novelIdB);
+
+        Assert.NotNull(novelA);
+        Assert.NotNull(novelB);
+        Assert.Equal(userA.Id, novelA.OwnerId);
+        Assert.Equal(userB.Id, novelB.OwnerId);
+        Assert.NotEqual(novelA.OwnerId, novelB.OwnerId);
+    }
+
+    [Fact]
+    public async Task UploadEndpoint_WithNullBytes_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        // UTF-8 BOM + 'A' + NUL + 'B'
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'A', 0x00, (byte)'B' };
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("Null Byte Novel"), "title");
+        form.Add(new StringContent("ja"), "sourceLanguage");
+        form.Add(new ByteArrayContent(bytes), "file", "nul.txt");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = form };
+        request.Headers.Add("X-XSRF-TOKEN", token);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("null", body, StringComparison.OrdinalIgnoreCase);
+
+        // Verify that nothing was persisted to DB
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+        var count = await db.Novels.CountAsync(n => n.Title == "Null Byte Novel");
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public async Task UploadEndpoint_WithMalformedUtf8Bytes_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        // UTF-8 BOM + 'A' + 0xFF + 'B' (0xFF is invalid UTF-8)
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'A', 0xFF, (byte)'B' };
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("Malformed Novel"), "title");
+        form.Add(new StringContent("ja"), "sourceLanguage");
+        form.Add(new ByteArrayContent(bytes), "file", "malformed.txt");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = form };
+        request.Headers.Add("X-XSRF-TOKEN", token);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("malformed", body, StringComparison.OrdinalIgnoreCase);
+
+        // Verify that nothing was persisted to DB
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+        var count = await db.Novels.CountAsync(n => n.Title == "Malformed Novel");
+        Assert.Equal(0, count);
     }
 }
 
