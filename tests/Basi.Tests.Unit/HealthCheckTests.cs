@@ -23,7 +23,9 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1"
+                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1",
+                ["Google:ClientId"] = "test-client-id",
+                ["Google:ClientSecret"] = "test-client-secret",
             });
         });
     }
@@ -62,7 +64,7 @@ public class HealthCheckTests : IClassFixture<TestWebApplicationFactory>
         var root = doc.RootElement;
 
         Assert.Equal("healthy", root.GetProperty("status").GetString());
-        Assert.Equal("0.1.0", root.GetProperty("version").GetString());
+        Assert.Equal("0.2.0", root.GetProperty("version").GetString());
         Assert.True(root.TryGetProperty("timestamp", out _));
         Assert.True(root.TryGetProperty("database", out var dbProp));
         var dbStatus = dbProp.GetString();

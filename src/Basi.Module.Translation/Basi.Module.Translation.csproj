@@ -3,6 +3,11 @@
     <RootNamespace>Basi.Module.Translation</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Basi.Tests.Unit</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Basi.Core\Basi.Core.csproj" />
   </ItemGroup>
 </Project>

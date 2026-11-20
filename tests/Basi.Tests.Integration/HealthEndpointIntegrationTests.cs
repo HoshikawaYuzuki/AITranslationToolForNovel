@@ -23,7 +23,9 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1"
+                ["ConnectionStrings:DefaultConnection"] = "Host=127.0.0.1;Port=54329;Database=basi_offline;Username=none;Password=none;Timeout=1;CommandTimeout=1",
+                ["Google:ClientId"] = "test-client-id",
+                ["Google:ClientSecret"] = "test-client-secret",
             });
         });
     }
@@ -74,14 +76,14 @@ public class HealthEndpointIntegrationTests : IClassFixture<IntegrationTestFacto
     }
 
     [Fact]
-    public async Task HealthEndpoint_VersionIs0_1_0()
+    public async Task HealthEndpoint_VersionIs0_2_0()
     {
         var client = _factory.CreateClient();
         var response = await client.GetAsync("/api/health");
 
         var body = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
-        Assert.Equal("0.1.0", doc.RootElement.GetProperty("version").GetString());
+        Assert.Equal("0.2.0", doc.RootElement.GetProperty("version").GetString());
     }
 
     [Fact]
