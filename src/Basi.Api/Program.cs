@@ -5,11 +5,13 @@ using Basi.Module.Identity.Models;
 using Basi.Module.Translation;
 using Basi.Module.Translation.Services;
 using Basi.Module.StoryMemory;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,7 +48,10 @@ builder.Services.AddAuthentication(options =>
     options.Cookie.Name = "Basi.Auth";
     options.Cookie.HttpOnly = true;
     options.Cookie.SameSite = SameSiteMode.Lax;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing")
+        ? CookieSecurePolicy.SameAsRequest
+        : CookieSecurePolicy.Always;
+
     // Return 401 JSON instead of redirect for API calls
     options.Events.OnRedirectToLogin = ctx =>
     {
@@ -65,6 +70,35 @@ builder.Services.AddAuthentication(options =>
     options.ClientSecret = builder.Configuration["Google:ClientSecret"] ?? string.Empty;
     options.CallbackPath = "/api/auth/callback";
     options.SaveTokens = false; // tokens stay in RAM only, never persisted
+
+    // Provision user immediately upon receiving OAuth ticket
+    options.Events.OnTicketReceived = async ticketCtx =>
+    {
+        var userManager = ticketCtx.HttpContext.RequestServices.GetRequiredService<UserManager<ApplicationUser>>();
+        var googleId = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        var email = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
+        var name = ticketCtx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
+
+        if (!string.IsNullOrEmpty(googleId) && !string.IsNullOrEmpty(email))
+        {
+            var user = await userManager.FindByLoginAsync("Google", googleId);
+            if (user == null)
+            {
+                user = new ApplicationUser
+                {
+                    UserName = email,
+                    Email = email,
+                    DisplayName = name ?? email,
+                    EmailConfirmed = true,
+                };
+                var createResult = await userManager.CreateAsync(user);
+                if (createResult.Succeeded)
+                {
+                    await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
+                }
+            }
+        }
+    };
 });
 
 builder.Services.AddAuthorization();
@@ -74,6 +108,10 @@ builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-XSRF-TOKEN";
     options.Cookie.Name = "Basi.Antiforgery";
+    options.Cookie.SameSite = SameSiteMode.Lax;
+    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing")
+        ? CookieSecurePolicy.SameAsRequest
+        : CookieSecurePolicy.Always;
 });
 
 // ---------- Swagger ----------
@@ -107,53 +145,85 @@ app.UseAuthorization();
 app.UseAntiforgery();
 
 // ======================================================================
+// Antiforgery Token Endpoint
+// ======================================================================
+
+// GET /api/antiforgery/token — Issues an antiforgery token for write operations
+app.MapGet("/api/antiforgery/token", (IAntiforgery antiforgery, HttpContext ctx) =>
+{
+    var tokens = antiforgery.GetAndStoreTokens(ctx);
+    return Results.Ok(new
+    {
+        token = tokens.RequestToken,
+        headerName = "X-XSRF-TOKEN"
+    });
+});
+
+// ======================================================================
 // Auth Endpoints
 // ======================================================================
 
-// GET /api/auth/login — redirect to Google
+// GET /api/auth/login — redirect to Google OAuth with open redirect protection
 app.MapGet("/api/auth/login", (HttpContext ctx, string? returnUrl) =>
 {
-    var redirectUri = returnUrl ?? "/";
+    // Strictly validate returnUrl to prevent open redirects:
+    // Must start with '/' and must NOT start with '//' or '/\'
+    var safeReturnUrl = "/";
+    if (!string.IsNullOrEmpty(returnUrl)
+        && returnUrl.StartsWith('/')
+        && !returnUrl.StartsWith("//")
+        && !returnUrl.StartsWith("/\\"))
+    {
+        safeReturnUrl = returnUrl;
+    }
+
     return Results.Challenge(
-        new Microsoft.AspNetCore.Authentication.AuthenticationProperties
+        new AuthenticationProperties
         {
-            RedirectUri = redirectUri
+            RedirectUri = safeReturnUrl
         },
         [GoogleDefaults.AuthenticationScheme]);
 });
 
-// GET /api/auth/callback — handled automatically by the Google middleware.
-// After a successful OAuth exchange the middleware calls OnTicketReceived.
-// We hook post-login user upsert here via a minimal endpoint that the
-// middleware redirects to after the cookie is issued.
-app.MapGet("/api/auth/me", async (HttpContext ctx, BasiDbContext db, UserManager<ApplicationUser> userManager) =>
+// GET /api/auth/me — returns current authenticated user information
+app.MapGet("/api/auth/me", async (HttpContext ctx, UserManager<ApplicationUser> userManager) =>
 {
     if (ctx.User.Identity?.IsAuthenticated != true)
         return Results.Unauthorized();
 
     var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-    var email = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
-    var name = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
-
-    if (googleId is null || email is null)
+    if (googleId is null)
         return Results.Unauthorized();
 
-    // Upsert user in DB
     var user = await userManager.FindByLoginAsync("Google", googleId);
     if (user is null)
     {
-        user = new ApplicationUser
+        // Safe fallback in case ticket received hook was bypassed (e.g. test schemes)
+        var email = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
+        var name = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
+        if (email is not null)
         {
-            UserName = email,
-            Email = email,
-            DisplayName = name ?? email,
-            EmailConfirmed = true,
-        };
-        var createResult = await userManager.CreateAsync(user);
-        if (!createResult.Succeeded)
-            return Results.Problem("Failed to create user account.");
-
-        await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
+            user = new ApplicationUser
+            {
+                UserName = email,
+                Email = email,
+                DisplayName = name ?? email,
+                EmailConfirmed = true,
+            };
+            var createResult = await userManager.CreateAsync(user);
+            if (createResult.Succeeded)
+            {
+                await userManager.AddLoginAsync(user, new UserLoginInfo("Google", googleId, "Google"));
+            }
+            else
+            {
+                return Results.Problem("Failed to create user account.");
+            }
+        }
+        else
+        {
+            return Results.Unauthorized();
+        }
     }
 
     return Results.Ok(new
@@ -165,9 +235,18 @@ app.MapGet("/api/auth/me", async (HttpContext ctx, BasiDbContext db, UserManager
     });
 }).RequireAuthorization();
 
-// POST /api/auth/logout
-app.MapPost("/api/auth/logout", async (HttpContext ctx) =>
+// POST /api/auth/logout — signs out and clears session cookie (requires antiforgery validation)
+app.MapPost("/api/auth/logout", async (HttpContext ctx, IAntiforgery antiforgery) =>
 {
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
     await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     return Results.Ok(new { message = "Logged out." });
 }).RequireAuthorization();
@@ -182,49 +261,102 @@ app.MapPost("/api/novels/upload", async (
     BasiDbContext db,
     UserManager<ApplicationUser> userManager,
     TxtParser parser,
+    IAntiforgery antiforgery,
     CancellationToken ct) =>
 {
+    // 1. Antiforgery validation
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    // 2. Auth check
     if (ctx.User.Identity?.IsAuthenticated != true)
         return Results.Unauthorized();
 
-    // Resolve current user
     var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
     if (googleId is null) return Results.Unauthorized();
 
     var appUser = await userManager.FindByLoginAsync("Google", googleId);
-    if (appUser is null) return Results.Unauthorized();
+    if (appUser is null)
+    {
+        // Fallback provisioning if not present
+        var email = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
+        var name = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value;
+        if (email is not null)
+        {
+            appUser = new ApplicationUser
+            {
+                UserName = email,
+                Email = email,
+                DisplayName = name ?? email,
+                EmailConfirmed = true,
+            };
+            var createRes = await userManager.CreateAsync(appUser);
+            if (createRes.Succeeded)
+            {
+                await userManager.AddLoginAsync(appUser, new UserLoginInfo("Google", googleId, "Google"));
+            }
+            else
+            {
+                return Results.Unauthorized();
+            }
+        }
+        else
+        {
+            return Results.Unauthorized();
+        }
+    }
 
-    // Parse multipart form
+    // 3. Form content-type check
     if (!ctx.Request.HasFormContentType)
         return Results.BadRequest("Request must be multipart/form-data.");
 
     var form = await ctx.Request.ReadFormAsync(ct);
     var file = form.Files.GetFile("file");
-    if (file is null)
-        return Results.BadRequest("Missing required form field: file.");
+    if (file is null || file.Length == 0)
+        return Results.BadRequest("Missing or empty file.");
 
+    // 4. Early file size check (BEFORE reading bytes into memory)
+    if (file.Length > TxtParser.MaxFileSizeBytes)
+        return Results.BadRequest($"File size {file.Length} bytes exceeds the 10 MB limit.");
+
+    // 5. File extension check
+    var extension = Path.GetExtension(file.FileName);
+    if (!string.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest("Only .txt files are supported.");
+
+    // 6. Title validation (max 512)
     var title = form["title"].FirstOrDefault()?.Trim();
     if (string.IsNullOrWhiteSpace(title))
         return Results.BadRequest("Missing required form field: title.");
+    if (title.Length > 512)
+        return Results.BadRequest("Title must not exceed 512 characters.");
 
+    // 7. Source language validation (max 32, BCP-47 tag format)
     var sourceLanguage = form["sourceLanguage"].FirstOrDefault()?.Trim();
     if (string.IsNullOrWhiteSpace(sourceLanguage))
         return Results.BadRequest("Missing required form field: sourceLanguage.");
+    if (sourceLanguage.Length > 32 || !Regex.IsMatch(sourceLanguage, @"^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$"))
+        return Results.BadRequest("Invalid sourceLanguage format. Must be a valid language code (e.g. ja, zh-CN, ko, en).");
 
-    // Read bytes
+    // 8. Read bytes safely
     byte[] bytes;
-    using (var ms = new MemoryStream())
+    using (var ms = new MemoryStream((int)file.Length))
     {
         await file.CopyToAsync(ms, ct);
         bytes = ms.ToArray();
     }
 
-    // Parse TXT
-    IReadOnlyList<Segment> segments;
+    // 9. Parse and persist
     try
     {
         var novelId = Guid.NewGuid();
-        segments = parser.Parse(bytes, novelId);
+        var parseResult = parser.ParseFull(bytes, novelId, sourceLanguage);
 
         var novel = new Novel
         {
@@ -232,11 +364,12 @@ app.MapPost("/api/novels/upload", async (
             OwnerId = appUser.Id,
             Title = title,
             SourceLanguage = sourceLanguage,
+            RawContent = parseResult.RawContent,
             UploadedAt = DateTime.UtcNow,
         };
 
         db.Novels.Add(novel);
-        db.Segments.AddRange(segments);
+        db.Segments.AddRange(parseResult.Segments);
         await db.SaveChangesAsync(ct);
 
         return Results.Ok(new
@@ -244,7 +377,7 @@ app.MapPost("/api/novels/upload", async (
             novelId = novel.Id,
             title = novel.Title,
             sourceLanguage = novel.SourceLanguage,
-            segmentCount = segments.Count,
+            segmentCount = parseResult.Segments.Count,
             uploadedAt = novel.UploadedAt,
         });
     }

@@ -89,7 +89,7 @@ public class TxtParserTests
     }
 
     // ------------------------------------------------------------------ //
-    //  Encoding detection                                                  //
+    //  Encoding detection & CJK CodePages                                  //
     // ------------------------------------------------------------------ //
 
     [Fact]
@@ -129,9 +129,78 @@ public class TxtParserTests
         Assert.Equal("UTF-16 BE text", segments[0].Content);
     }
 
+    [Fact]
+    public void Parse_ShiftJis_DecodesCorrectly()
+    {
+        var text = "吾輩は猫である。\n\n名前はまだ無い。";
+        var sjis = Encoding.GetEncoding("shift_jis");
+        var bytes = sjis.GetBytes(text);
+
+        var segments = _parser.Parse(bytes, TestNovelId, "ja");
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal("吾輩は猫である。", segments[0].Content);
+        Assert.Equal("名前はまだ無い。", segments[1].Content);
+    }
+
+    [Fact]
+    public void Parse_Gb18030_DecodesCorrectly()
+    {
+        var text = "第一章：风起云涌\n\n这是一个关于冒险的故事。";
+        var gb = Encoding.GetEncoding("gb18030");
+        var bytes = gb.GetBytes(text);
+
+        var segments = _parser.Parse(bytes, TestNovelId, "zh-CN");
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal("第一章：风起云涌", segments[0].Content);
+        Assert.Equal("这是一个关于冒险的故事。", segments[1].Content);
+    }
+
+    [Fact]
+    public void Parse_EucKr_DecodesCorrectly()
+    {
+        var text = "제1장: 새로운 시작\n\n모든 것은 그날 시작되었다.";
+        var eucKr = Encoding.GetEncoding("euc-kr");
+        var bytes = eucKr.GetBytes(text);
+
+        var segments = _parser.Parse(bytes, TestNovelId, "ko");
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal("제1장: 새로운 시작", segments[0].Content);
+        Assert.Equal("모든 것은 그날 시작되었다.", segments[1].Content);
+    }
+
     // ------------------------------------------------------------------ //
-    //  Size validation                                                     //
+    //  Preservation & ParseFull                                            //
     // ------------------------------------------------------------------ //
+
+    [Fact]
+    public void ParseFull_PreservesRawContent_AndNormalizesLineEndings()
+    {
+        var original = "Line 1\r\n\r\nLine 2 with internal\r\nnewline.\r\n\r\nLine 3.";
+        var bytes = Encoding.UTF8.GetBytes(original);
+
+        var result = _parser.ParseFull(bytes, TestNovelId);
+
+        Assert.Equal("Line 1\n\nLine 2 with internal\nnewline.\n\nLine 3.", result.RawContent);
+        Assert.Equal(3, result.Segments.Count);
+        Assert.Equal("Line 2 with internal\nnewline.", result.Segments[1].Content);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Binary file & Size validation                                       //
+    // ------------------------------------------------------------------ //
+
+    [Fact]
+    public void Parse_BinaryFile_ThrowsArgumentException()
+    {
+        var binary = new byte[100];
+        Array.Fill(binary, (byte)0); // All null bytes
+
+        var ex = Assert.Throws<ArgumentException>(() => _parser.Parse(binary, TestNovelId));
+        Assert.Contains("binary", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 
     [Fact]
     public void Parse_FileTooLarge_ThrowsArgumentException()
@@ -145,12 +214,8 @@ public class TxtParserTests
     [Fact]
     public void Parse_ExactlyAtLimit_DoesNotThrow()
     {
-        // 10 MB of spaces — no paragraphs → will throw InvalidOperationException, not ArgumentException
-        // So we just confirm ArgumentException is NOT thrown for size
         var atLimit = new byte[10 * 1024 * 1024];
-        // Fill with valid whitespace so size check passes but content fails
         Array.Fill(atLimit, (byte)' ');
-        // Should NOT throw ArgumentException
         Assert.Throws<InvalidOperationException>(() => _parser.Parse(atLimit, TestNovelId));
     }
 

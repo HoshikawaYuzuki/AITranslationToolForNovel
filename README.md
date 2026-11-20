@@ -44,8 +44,8 @@ dotnet build
 # Run unit tests
 dotnet test
 
-# Database setup (EF Core migrations will be introduced in Task 2)
-# cd src/Basi.Api && dotnet ef database update
+# Apply EF Core migrations to development database
+dotnet dotnet-ef database update -p src/Basi.Api -s src/Basi.Api
 ```
 
 ### Frontend

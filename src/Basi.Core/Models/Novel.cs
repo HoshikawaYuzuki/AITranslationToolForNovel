@@ -12,6 +12,9 @@ public sealed class Novel
     /// <summary>BCP-47 language tag, e.g. "ja", "zh-CN", "ko".</summary>
     public string SourceLanguage { get; set; } = string.Empty;
 
+    /// <summary>Preserved raw text content of the uploaded novel.</summary>
+    public string RawContent { get; set; } = string.Empty;
+
     public DateTime UploadedAt { get; init; } = DateTime.UtcNow;
 
     public ICollection<Segment> Segments { get; init; } = new List<Segment>();

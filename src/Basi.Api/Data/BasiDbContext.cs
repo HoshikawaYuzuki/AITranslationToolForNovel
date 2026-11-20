@@ -32,6 +32,7 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
             b.HasKey(n => n.Id);
             b.Property(n => n.Title).HasMaxLength(512).IsRequired();
             b.Property(n => n.SourceLanguage).HasMaxLength(32).IsRequired();
+            b.Property(n => n.RawContent).IsRequired();
             b.Property(n => n.UploadedAt).HasDefaultValueSql("now()");
             b.HasOne<ApplicationUser>()
              .WithMany()

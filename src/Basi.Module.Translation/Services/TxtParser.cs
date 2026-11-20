@@ -1,23 +1,34 @@
+using System.Text;
 using Basi.Core.Models;
 
 namespace Basi.Module.Translation.Services;
 
 /// <summary>
-/// Parses a raw TXT file into a list of <see cref="Segment"/> records.
+/// Result of parsing a raw text document, including full preserved raw text and individual segments.
+/// </summary>
+public sealed record TxtParseResult(string RawContent, IReadOnlyList<Segment> Segments);
+
+/// <summary>
+/// Parses a raw TXT file into a preserved raw string and an ordered list of <see cref="Segment"/> records.
 /// </summary>
 public sealed class TxtParser
 {
-    private const int MaxFileSizeBytes = 10 * 1024 * 1024; // 10 MB
+    public const int MaxFileSizeBytes = 10 * 1024 * 1024; // 10 MB
+
+    static TxtParser()
+    {
+        // Register CJK and other international code pages (Shift-JIS, GB18030, EUC-KR, Windows-125x)
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+    }
 
     /// <summary>
-    /// Parses raw bytes into an ordered list of segments.
+    /// Parses raw bytes into preserved raw text and segments.
     /// </summary>
     /// <param name="bytes">Raw file bytes.</param>
     /// <param name="novelId">The novel these segments belong to.</param>
-    /// <returns>Ordered, non-empty list of segments.</returns>
-    /// <exception cref="ArgumentException">When the file is too large.</exception>
-    /// <exception cref="InvalidOperationException">When no non-empty paragraphs are found.</exception>
-    public IReadOnlyList<Segment> Parse(byte[] bytes, Guid novelId)
+    /// <param name="sourceLanguageHint">Optional BCP-47 language tag hint (e.g. "ja", "zh-CN", "ko") for accurate CJK detection.</param>
+    /// <returns>A <see cref="TxtParseResult"/> containing normalized raw text and segments.</returns>
+    public TxtParseResult ParseFull(byte[] bytes, Guid novelId, string? sourceLanguageHint = null)
     {
         ArgumentNullException.ThrowIfNull(bytes);
 
@@ -25,67 +36,137 @@ public sealed class TxtParser
             throw new ArgumentException(
                 $"File size {bytes.Length} bytes exceeds the {MaxFileSizeBytes / (1024 * 1024)} MB limit.");
 
-        var text = DetectAndDecode(bytes);
-        return SplitIntoSegments(text, novelId);
+        if (bytes.Length == 0)
+            throw new InvalidOperationException("The uploaded file is empty.");
+
+        // 1. Try BOM detection first. UTF-16 with BOM contains 50% null bytes for ASCII and is legitimate.
+        string? text = TryDetectBom(bytes);
+
+        // 2. If no BOM, check for binary content (null bytes check)
+        if (text is null)
+        {
+            int nullCount = 0;
+            int checkLimit = Math.Min(bytes.Length, 8192);
+            for (int i = 0; i < checkLimit; i++)
+            {
+                if (bytes[i] == 0) nullCount++;
+            }
+            if (nullCount > 0)
+                throw new ArgumentException("The file appears to be binary, not plain text.");
+
+            text = DetectAndDecode(bytes, sourceLanguageHint);
+        }
+
+        var normalized = text.Replace("\r\n", "\n").Replace("\r", "\n");
+        var segments = SplitIntoSegments(normalized, novelId);
+
+        return new TxtParseResult(normalized, segments);
+    }
+
+    /// <summary>
+    /// Convenience backward-compatible method that returns only segments.
+    /// </summary>
+    public IReadOnlyList<Segment> Parse(byte[] bytes, Guid novelId, string? sourceLanguageHint = null)
+    {
+        return ParseFull(bytes, novelId, sourceLanguageHint).Segments;
     }
 
     // ------------------------------------------------------------------ //
     //  Encoding detection                                                  //
     // ------------------------------------------------------------------ //
 
-    internal static string DetectAndDecode(byte[] bytes)
+    internal static string? TryDetectBom(byte[] bytes)
     {
-        // 1. BOM-based detection (fastest, most reliable)
+        // UTF-8 BOM
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            return System.Text.Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
 
-        if (bytes.Length >= 2)
+        // UTF-16 LE BOM
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+
+        // UTF-16 BE BOM
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+
+        return null;
+    }
+
+    internal static string DetectAndDecode(byte[] bytes, string? sourceLanguageHint = null)
+    {
+        var bomText = TryDetectBom(bytes);
+        if (bomText != null) return bomText;
+
+        // Try UTF-8 strict (no fallback chars)
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        try
         {
-            if (bytes[0] == 0xFF && bytes[1] == 0xFE)
-                return System.Text.Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2); // UTF-16 LE
-            if (bytes[0] == 0xFE && bytes[1] == 0xFF)
-                return System.Text.Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2); // UTF-16 BE
+            return utf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            // Not valid UTF-8, proceed to CJK detection
         }
 
-        // 2. Try UTF-8 strict (no fallback chars)
-        var utf8 = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-        try { return utf8.GetString(bytes); }
-        catch (System.Text.DecoderFallbackException) { /* not valid UTF-8 */ }
+        // Determine candidate order based on language hint
+        var candidates = GetEncodingCandidates(sourceLanguageHint);
 
-        // 3. Heuristic: try common CJK encodings in order
-        var candidates = new[]
-        {
-            System.Text.Encoding.GetEncoding("shift_jis"),
-            System.Text.Encoding.GetEncoding("gb18030"),
-            System.Text.Encoding.GetEncoding("euc-kr"),
-        };
-
-        foreach (var enc in candidates)
+        foreach (var name in candidates)
         {
             try
             {
-                // Re-encode round-trip sanity check
+                var enc = Encoding.GetEncoding(name, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
                 var decoded = enc.GetString(bytes);
+
+                // Reject if decoded text contains unprintable control characters (except common whitespace)
+                if (decoded.Any(c => char.IsControl(c) && c != '\r' && c != '\n' && c != '\t'))
+                    continue;
+
                 var reEncoded = enc.GetBytes(decoded);
                 if (reEncoded.SequenceEqual(bytes))
                     return decoded;
             }
-            catch { /* try next */ }
+            catch
+            {
+                // Failed strict decoding, try next candidate
+            }
         }
 
-        // 4. Final fallback: UTF-8 with replacement
-        return System.Text.Encoding.UTF8.GetString(bytes);
+        // Final fallback: UTF-8 with replacement
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    private static string[] GetEncodingCandidates(string? sourceLanguageHint)
+    {
+        if (!string.IsNullOrEmpty(sourceLanguageHint))
+        {
+            var hint = sourceLanguageHint.Trim().ToLowerInvariant();
+            if (hint.StartsWith("zh"))
+            {
+                if (hint.Contains("tw") || hint.Contains("hk"))
+                    return ["big5", "gb18030", "shift_jis", "euc-kr"];
+                return ["gb18030", "big5", "shift_jis", "euc-kr"];
+            }
+            if (hint.StartsWith("ja"))
+            {
+                return ["shift_jis", "gb18030", "euc-kr", "big5"];
+            }
+            if (hint.StartsWith("ko"))
+            {
+                return ["euc-kr", "shift_jis", "gb18030", "big5"];
+            }
+        }
+
+        return ["shift_jis", "gb18030", "euc-kr", "big5"];
     }
 
     // ------------------------------------------------------------------ //
     //  Segmentation                                                        //
     // ------------------------------------------------------------------ //
 
-    internal static IReadOnlyList<Segment> SplitIntoSegments(string text, Guid novelId)
+    internal static IReadOnlyList<Segment> SplitIntoSegments(string normalizedText, Guid novelId)
     {
-        // Normalize line endings then split on blank lines (paragraph boundary)
-        var normalized = text.Replace("\r\n", "\n").Replace("\r", "\n");
-        var paragraphs = normalized
+        var paragraphs = normalizedText
             .Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
             .Select(p => p.Trim())
             .Where(p => !string.IsNullOrWhiteSpace(p))

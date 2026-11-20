@@ -31,6 +31,10 @@ namespace Basi.Api.Migrations
                     b.Property<Guid>("OwnerId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("RawContent")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("SourceLanguage")
                         .IsRequired()
                         .HasMaxLength(32)
