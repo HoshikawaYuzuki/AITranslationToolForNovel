@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using System.Text.RegularExpressions;
@@ -27,6 +28,13 @@ builder.Services.AddDbContext<BasiDbContext>(options =>
 
 // ---------- Health Checks ----------
 builder.Services.AddHealthChecks();
+
+// ---------- Upload / Form Size Limits ----------
+builder.Services.Configure<FormOptions>(options =>
+{
+    // Max 10MB file payload + 2MB allowance for multipart metadata and form fields
+    options.MultipartBodyLengthLimit = 12 * 1024 * 1024;
+});
 
 // ---------- CORS ----------
 builder.Services.AddCors(options =>

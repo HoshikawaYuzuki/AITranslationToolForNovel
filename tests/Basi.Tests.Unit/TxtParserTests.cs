@@ -271,6 +271,18 @@ public class TxtParserTests
     }
 
     [Fact]
+    public void Parse_ValidUtf8WithLiteralReplacementCharacter_DecodesCorrectly()
+    {
+        // Valid UTF-8 containing literal U+FFFD (0xEF, 0xBF, 0xBD) should be accepted
+        var text = "Valid content with \uFFFD replacement symbol";
+        var bytes = Encoding.UTF8.GetBytes(text);
+
+        var result = _parser.Parse(bytes, TestNovelId);
+        Assert.Single(result);
+        Assert.Equal(text, result[0].Content);
+    }
+
+    [Fact]
     public void Parse_FileTooLarge_ThrowsArgumentException()
     {
         var oversized = new byte[10 * 1024 * 1024 + 1];

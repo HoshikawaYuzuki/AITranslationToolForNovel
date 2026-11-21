@@ -52,10 +52,6 @@ public sealed class TxtParser
         if (text.Any(c => char.IsControl(c) && c != '\r' && c != '\n' && c != '\t'))
             throw new ArgumentException("The file contains invalid control characters.");
 
-        // 3. Reject any replacement characters (U+FFFD)
-        if (text.Contains('\uFFFD'))
-            throw new ArgumentException("The file contains malformed or unmappable characters.");
-
         var normalized = text.Replace("\r\n", "\n").Replace("\r", "\n");
         var segments = SplitIntoSegments(normalized, novelId);
 
