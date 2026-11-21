@@ -29,35 +29,25 @@ public static class OAuthUserProvisioner
             return ProvisioningResult.Failed("Google authentication response missing required claims.");
         }
 
-        // Validate email_verified if present in claims
-        var emailVerifiedClaim = principal?.FindFirst("email_verified")?.Value;
-        if (emailVerifiedClaim != null && bool.TryParse(emailVerifiedClaim, out var isVerified) && !isVerified)
-        {
-            return ProvisioningResult.Failed("Google email address is not verified.");
-        }
-
-        // 1. Check if user already exists with this Google login
+        // 1. Check if user already exists with this exact Google login
         var user = await userManager.FindByLoginAsync(GoogleProvider, googleId);
         if (user != null)
         {
             return ProvisioningResult.Success(user);
         }
 
-        // 2. Check if a user already exists with the same email
+        // 2. For new accounts or linking, verify that email is verified by Google
+        var emailVerifiedClaim = principal?.FindFirst("email_verified")?.Value;
+        if (string.IsNullOrEmpty(emailVerifiedClaim) || !bool.TryParse(emailVerifiedClaim, out var isVerified) || !isVerified)
+        {
+            return ProvisioningResult.Failed("Google email address must be verified to provision or link an account.");
+        }
+
+        // 3. Check if an account already exists with this email
         var isNewUser = false;
         user = await userManager.FindByEmailAsync(email);
-        if (user != null)
+        if (user == null)
         {
-            // Verify that the existing account is not already bound to a conflicting Google ID
-            var existingLogins = await userManager.GetLoginsAsync(user);
-            if (existingLogins.Any(l => l.LoginProvider == GoogleProvider && l.ProviderKey != googleId))
-            {
-                return ProvisioningResult.Failed("An existing account with this email is already linked to a different Google account.");
-            }
-        }
-        else
-        {
-            isNewUser = true;
             user = new ApplicationUser
             {
                 UserName = email,
@@ -68,7 +58,7 @@ public static class OAuthUserProvisioner
             var createResult = await userManager.CreateAsync(user);
             if (!createResult.Succeeded)
             {
-                // Handle potential race condition on concurrent first login
+                // Concurrency recovery: user might have been created concurrently by email or login
                 user = await userManager.FindByLoginAsync(GoogleProvider, googleId)
                     ?? await userManager.FindByEmailAsync(email);
 
@@ -76,26 +66,46 @@ public static class OAuthUserProvisioner
                 {
                     return ProvisioningResult.Failed("Failed to create local user account: " + string.Join("; ", createResult.Errors.Select(e => e.Description)));
                 }
-
-                // If concurrent request already linked the Google login, return success
-                var concurrentLogins = await userManager.GetLoginsAsync(user);
-                if (concurrentLogins.Any(l => l.LoginProvider == GoogleProvider && l.ProviderKey == googleId))
-                {
-                    return ProvisioningResult.Success(user);
-                }
-
-                isNewUser = false;
+            }
+            else
+            {
+                isNewUser = true;
             }
         }
 
-        // 3. Link Google external login to the user
+        // 4. Uniform identity check across ALL code paths (initial lookup & concurrency recovery)
+        var logins = await userManager.GetLoginsAsync(user);
+
+        // Already linked to this exact Google ID?
+        if (logins.Any(l => l.LoginProvider == GoogleProvider && l.ProviderKey == googleId))
+        {
+            return ProvisioningResult.Success(user);
+        }
+
+        // Conflict: already linked to a different Google ID?
+        if (logins.Any(l => l.LoginProvider == GoogleProvider && l.ProviderKey != googleId))
+        {
+            return ProvisioningResult.Failed("An existing account with this email is already linked to a different Google account.");
+        }
+
+        // 5. Link Google external login to user
         var addLoginResult = await userManager.AddLoginAsync(user, new UserLoginInfo(GoogleProvider, googleId, GoogleProvider));
         if (!addLoginResult.Succeeded)
         {
             if (isNewUser)
             {
-                // Cleanup orphan user account if external login association fails
-                await userManager.DeleteAsync(user);
+                // Only clean up if user has no other logins
+                var currentLogins = await userManager.GetLoginsAsync(user);
+                if (currentLogins.Count == 0)
+                {
+                    var deleteResult = await userManager.DeleteAsync(user);
+                    if (!deleteResult.Succeeded)
+                    {
+                        return ProvisioningResult.Failed(
+                            "Failed to associate Google login with user, and orphan cleanup failed: " +
+                            string.Join("; ", deleteResult.Errors.Select(e => e.Description)));
+                    }
+                }
             }
             return ProvisioningResult.Failed("Failed to associate Google login with user: " + string.Join("; ", addLoginResult.Errors.Select(e => e.Description)));
         }

@@ -30,6 +30,12 @@ builder.Services.AddDbContext<BasiDbContext>(options =>
 builder.Services.AddHealthChecks();
 
 // ---------- Upload / Form Size Limits ----------
+builder.WebHost.ConfigureKestrel(options =>
+{
+    // Max 12MB total request payload at the server transport layer
+    options.Limits.MaxRequestBodySize = 12 * 1024 * 1024;
+});
+
 builder.Services.Configure<FormOptions>(options =>
 {
     // Max 10MB file payload + 2MB allowance for multipart metadata and form fields
@@ -80,6 +86,7 @@ builder.Services.AddAuthentication(options =>
     options.ClientSecret = builder.Configuration["Google:ClientSecret"] ?? string.Empty;
     options.CallbackPath = "/api/auth/callback";
     options.SaveTokens = false; // tokens stay in RAM only, never persisted
+    options.ClaimActions.MapJsonKey("email_verified", "email_verified");
 
     // Strictly provision user upon receiving OAuth ticket.
     // If user creation or login association fails, the ticket is failed.
@@ -254,7 +261,20 @@ app.MapPost("/api/novels/upload", async (
     if (!ctx.Request.HasFormContentType)
         return Results.BadRequest("Request must be multipart/form-data.");
 
-    var form = await ctx.Request.ReadFormAsync(ct);
+    IFormCollection form;
+    try
+    {
+        form = await ctx.Request.ReadFormAsync(ct);
+    }
+    catch (InvalidDataException)
+    {
+        return Results.BadRequest("Uploaded multipart form or file exceeds the maximum allowed size limit.");
+    }
+    catch (BadHttpRequestException ex)
+    {
+        return Results.StatusCode(ex.StatusCode);
+    }
+
     var file = form.Files.GetFile("file");
     if (file is null || file.Length == 0)
         return Results.BadRequest("Missing or empty file.");

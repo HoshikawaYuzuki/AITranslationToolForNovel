@@ -54,7 +54,8 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
         {
             new Claim(ClaimTypes.NameIdentifier, googleId),
             new Claim(ClaimTypes.Email, email),
-            new Claim(ClaimTypes.Name, name)
+            new Claim(ClaimTypes.Name, name),
+            new Claim("email_verified", "true")
         };
         var identity = new ClaimsIdentity(claims, SchemeName);
         var principal = new ClaimsPrincipal(identity);
@@ -235,6 +236,30 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
         var properties = googleOptions.StateDataFormat.Unprotect(state);
         Assert.NotNull(properties);
         Assert.Equal("/", properties.RedirectUri);
+    }
+
+    [Fact]
+    public void GoogleOptions_ConfiguresEmailVerifiedClaimMapping_AndExtractsClaimFromJson()
+    {
+        // Tests P3: verifies that ClaimActions includes email_verified mapping and extracts it from userinfo payload
+        var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
+        Assert.NotNull(googleOptions);
+
+        var action = googleOptions.ClaimActions.FirstOrDefault(a => a.ClaimType == "email_verified");
+        Assert.NotNull(action);
+
+        // Verify running ClaimActions extracts email_verified as a claim from JSON
+        var json = "{\"sub\":\"123456\",\"email\":\"test@example.com\",\"email_verified\":true}";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var identity = new ClaimsIdentity();
+        foreach (var claimAction in googleOptions.ClaimActions)
+        {
+            claimAction.Run(doc.RootElement, identity, "Google");
+        }
+
+        var claim = identity.FindFirst("email_verified");
+        Assert.NotNull(claim);
+        Assert.Equal("True", claim.Value, ignoreCase: true);
     }
 
     [Fact]
@@ -501,6 +526,29 @@ public class AuthenticatedFlowIntegrationTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("exceeds the 10 MB limit", body);
+    }
+
+    [Fact]
+    public async Task UploadEndpoint_WhenMultipartBodyExceedsLimit_ReturnsBadRequest()
+    {
+        // Tests resource limit handling: oversized multipart body triggers InvalidDataException in ReadFormAsync
+        // which returns clean 400 Bad Request instead of 500.
+        var client = _factory.CreateClient();
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        // 13MB payload exceeds the 12MB multipart limit
+        var oversizedBytes = new byte[13 * 1024 * 1024];
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("Huge Payload"), "title");
+        form.Add(new StringContent("en"), "sourceLanguage");
+        form.Add(new ByteArrayContent(oversizedBytes), "file", "oversized.txt");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/novels/upload") { Content = form };
+        request.Headers.Add("X-XSRF-TOKEN", token);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
