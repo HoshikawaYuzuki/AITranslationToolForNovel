@@ -46,6 +46,11 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        if (Request.Headers.ContainsKey("X-Test-Anonymous"))
+        {
+            return Task.FromResult(AuthenticateResult.NoResult());
+        }
+
         var googleId = Request.Headers.TryGetValue(UserIdHeader, out var uid) ? uid.ToString() : TestGoogleId;
         var email = Request.Headers.TryGetValue(UserEmailHeader, out var uemail) ? uemail.ToString() : TestEmail;
         var name = Request.Headers.TryGetValue(UserNameHeader, out var uname) ? uname.ToString() : TestName;

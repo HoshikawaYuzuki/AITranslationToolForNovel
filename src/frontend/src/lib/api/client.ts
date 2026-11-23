@@ -27,6 +27,51 @@ export interface AntiforgeryTokenResponse {
   headerName: string;
 }
 
+export interface ApiKeyStatus {
+  [provider: string]: boolean;
+}
+
+export interface SetApiKeyResponse {
+  success: boolean;
+  provider: string;
+}
+
+export interface NovelSummary {
+  id: string;
+  title: string;
+  sourceLanguage: string;
+  segmentCount: number;
+  uploadedAt: string;
+}
+
+export interface TranslationJobSummary {
+  id: string;
+  novelId: string;
+  targetLanguage: string;
+  provider: string;
+  model: string;
+  status: 'Created' | 'Queued' | 'Processing' | 'WaitingForApiKey' | 'Completed' | 'Failed' | 'Cancelled';
+  totalSegments: number;
+  completedSegments: number;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranslatedSegmentItem {
+  id: string;
+  segmentId: string;
+  order: number;
+  sourceText: string;
+  translatedText?: string | null;
+  status: 'Pending' | 'Translating' | 'Completed' | 'Failed';
+  errorMessage?: string | null;
+}
+
+export interface TranslationJobDetail extends TranslationJobSummary {
+  segments: TranslatedSegmentItem[];
+}
+
 export async function checkHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_BASE}/health`);
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
@@ -86,6 +131,106 @@ export async function uploadNovel(
     throw new Error(errorText || `Upload failed with status ${res.status}`);
   }
 
+  return res.json();
+}
+
+// BYOK Key Vault Endpoints (ADR-004)
+export async function getApiKeyStatus(): Promise<ApiKeyStatus> {
+  const res = await fetch(`${API_BASE}/auth/api-keys`, { credentials: 'include' });
+  if (!res.ok) throw new Error('Failed to get API key status');
+  return res.json();
+}
+
+export async function setApiKey(provider: string, apiKey: string): Promise<SetApiKeyResponse> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/auth/api-keys`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      [headerName]: token,
+    },
+    body: JSON.stringify({ provider, apiKey }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Failed to save API key');
+    throw new Error(err);
+  }
+  return res.json();
+}
+
+export async function deleteApiKey(provider: string): Promise<{ success: boolean; provider: string }> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/auth/api-keys/${encodeURIComponent(provider)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+    headers: {
+      [headerName]: token,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Failed to delete API key');
+    throw new Error(err);
+  }
+  return res.json();
+}
+
+// Novels Endpoints
+export async function getNovels(): Promise<NovelSummary[]> {
+  const res = await fetch(`${API_BASE}/novels`, { credentials: 'include' });
+  if (!res.ok) throw new Error('Failed to fetch novels');
+  return res.json();
+}
+
+// Translation Endpoints (BASI-003)
+export async function createTranslationJob(
+  novelId: string,
+  targetLanguage: string,
+  provider: string,
+  model?: string
+): Promise<TranslationJobSummary> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/translations`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      [headerName]: token,
+    },
+    body: JSON.stringify({ novelId, targetLanguage, provider, model }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Failed to submit translation');
+    throw new Error(err);
+  }
+  return res.json();
+}
+
+export async function getTranslationJobs(): Promise<TranslationJobSummary[]> {
+  const res = await fetch(`${API_BASE}/translations`, { credentials: 'include' });
+  if (!res.ok) throw new Error('Failed to fetch translation jobs');
+  return res.json();
+}
+
+export async function getTranslationJob(id: string): Promise<TranslationJobDetail> {
+  const res = await fetch(`${API_BASE}/translations/${encodeURIComponent(id)}`, { credentials: 'include' });
+  if (!res.ok) throw new Error('Failed to fetch translation job details');
+  return res.json();
+}
+
+export async function cancelTranslationJob(id: string): Promise<{ id: string; status: string }> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/translations/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      [headerName]: token,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Failed to cancel translation job');
+    throw new Error(err);
+  }
   return res.json();
 }
 

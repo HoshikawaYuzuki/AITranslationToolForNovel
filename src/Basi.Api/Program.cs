@@ -132,6 +132,9 @@ builder.Services.AddStoryMemoryModule();
 // Register TxtParser
 builder.Services.AddSingleton<TxtParser>();
 
+// Background Queue Worker (ADR-005)
+builder.Services.AddHostedService<Basi.Api.Workers.TranslationQueueWorker>();
+
 var app = builder.Build();
 
 // ---------- Middleware ----------
@@ -238,6 +241,113 @@ app.MapPost("/api/auth/logout", async (HttpContext ctx, IAntiforgery antiforgery
 
     await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     return Results.Ok(new { message = "Logged out." });
+}).RequireAuthorization();
+
+// ======================================================================
+// BYOK API Key Endpoints (RAM-Only per ADR-004)
+// ======================================================================
+
+// POST /api/auth/api-keys — sets user's AI provider key in RAM only
+app.MapPost("/api/auth/api-keys", async (
+    HttpContext ctx,
+    SetApiKeyRequest req,
+    UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault,
+    BasiDbContext db,
+    IAntiforgery antiforgery) =>
+{
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(req.Provider) || string.IsNullOrWhiteSpace(req.ApiKey))
+        return Results.BadRequest(new { error = "Provider and ApiKey are required." });
+
+    var normProvider = req.Provider.Trim().ToLowerInvariant();
+    if (normProvider is not ("gemini" or "openai"))
+        return Results.BadRequest(new { error = "Supported providers are 'gemini' and 'openai'." });
+
+    keyVault.SetKey(user.Id, normProvider, req.ApiKey.Trim());
+
+    // State machine: WaitingForApiKey -> Queued when key is provided (CONTRACTS.md)
+    var waitingJobs = await db.TranslationJobs
+        .Where(j => j.OwnerId == user.Id && j.Status == JobStatus.WaitingForApiKey && j.Provider.ToLower() == normProvider)
+        .ToListAsync();
+    foreach (var wj in waitingJobs)
+    {
+        wj.Status = JobStatus.Queued;
+        wj.ErrorMessage = null;
+        wj.UpdatedAt = DateTime.UtcNow;
+    }
+    if (waitingJobs.Count > 0)
+    {
+        await db.SaveChangesAsync();
+    }
+
+    return Results.Ok(new { success = true, provider = normProvider });
+}).RequireAuthorization();
+
+// GET /api/auth/api-keys — returns active status of keys in RAM (never returns raw keys)
+app.MapGet("/api/auth/api-keys", async (
+    HttpContext ctx,
+    UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var status = keyVault.GetKeyStatus(user.Id);
+    return Results.Ok(status);
+}).RequireAuthorization();
+
+// DELETE /api/auth/api-keys/{provider} — clears provider key from RAM
+app.MapDelete("/api/auth/api-keys/{provider}", async (
+    HttpContext ctx,
+    string provider,
+    UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault,
+    IAntiforgery antiforgery) =>
+{
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var removed = keyVault.RemoveKey(user.Id, provider);
+    return Results.Ok(new { success = removed, provider = provider.ToLowerInvariant() });
 }).RequireAuthorization();
 
 // ======================================================================
@@ -365,6 +475,368 @@ app.MapPost("/api/novels/upload", async (
     }
 }).RequireAuthorization();
 
+// GET /api/novels — lists uploaded novels for current user
+app.MapGet("/api/novels", async (
+    HttpContext ctx,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    CancellationToken ct) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var novels = await db.Novels
+        .Where(n => n.OwnerId == user.Id)
+        .OrderByDescending(n => n.UploadedAt)
+        .Select(n => new
+        {
+            id = n.Id,
+            title = n.Title,
+            sourceLanguage = n.SourceLanguage,
+            segmentCount = n.Segments.Count,
+            uploadedAt = n.UploadedAt
+        })
+        .ToListAsync(ct);
+
+    return Results.Ok(novels);
+}).RequireAuthorization();
+
+// GET /api/novels/{id:guid} — gets details of a single novel with segments
+app.MapGet("/api/novels/{id:guid}", async (
+    HttpContext ctx,
+    Guid id,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    CancellationToken ct) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var novel = await db.Novels
+        .Include(n => n.Segments)
+        .FirstOrDefaultAsync(n => n.Id == id && n.OwnerId == user.Id, ct);
+
+    if (novel == null)
+        return Results.NotFound(new { error = "Novel not found." });
+
+    return Results.Ok(new
+    {
+        id = novel.Id,
+        title = novel.Title,
+        sourceLanguage = novel.SourceLanguage,
+        uploadedAt = novel.UploadedAt,
+        segments = novel.Segments.OrderBy(s => s.Order).Select(s => new
+        {
+            id = s.Id,
+            order = s.Order,
+            content = s.Content
+        }).ToList()
+    });
+}).RequireAuthorization();
+
+// GET /api/novels/{id:guid}/translations — gets translation jobs for a novel
+app.MapGet("/api/novels/{id:guid}/translations", async (
+    HttpContext ctx,
+    Guid id,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    CancellationToken ct) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var novelExists = await db.Novels.AnyAsync(n => n.Id == id && n.OwnerId == user.Id, ct);
+    if (!novelExists)
+        return Results.NotFound(new { error = "Novel not found." });
+
+    var jobs = await db.TranslationJobs
+        .Where(j => j.NovelId == id && j.OwnerId == user.Id)
+        .OrderByDescending(j => j.CreatedAt)
+        .Select(j => new
+        {
+            id = j.Id,
+            novelId = j.NovelId,
+            targetLanguage = j.TargetLanguage,
+            provider = j.Provider,
+            model = j.Model,
+            status = j.Status.ToString(),
+            totalSegments = j.TotalSegments,
+            completedSegments = j.CompletedSegments,
+            errorMessage = j.ErrorMessage,
+            createdAt = j.CreatedAt,
+            updatedAt = j.UpdatedAt
+        })
+        .ToListAsync(ct);
+
+    return Results.Ok(jobs);
+}).RequireAuthorization();
+
+// ======================================================================
+// Translation Endpoints (BASI-003)
+// ======================================================================
+
+// POST /api/translations — submits novel for translation
+app.MapPost("/api/translations", async (
+    HttpContext ctx,
+    CreateTranslationRequest req,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    IAntiforgery antiforgery,
+    CancellationToken ct) =>
+{
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    if (req.NovelId == Guid.Empty)
+        return Results.BadRequest(new { error = "Valid NovelId is required." });
+
+    if (string.IsNullOrWhiteSpace(req.TargetLanguage))
+        return Results.BadRequest(new { error = "TargetLanguage is required." });
+
+    var targetLang = req.TargetLanguage.Trim();
+    if (targetLang.Length > 32 || !Regex.IsMatch(targetLang, @"^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$"))
+        return Results.BadRequest(new { error = "Invalid TargetLanguage format. Must be a valid BCP-47 tag (e.g. vi, en, ja)." });
+
+    if (string.IsNullOrWhiteSpace(req.Provider))
+        return Results.BadRequest(new { error = "Provider is required." });
+
+    var normProvider = req.Provider.Trim().ToLowerInvariant();
+    if (normProvider is not ("gemini" or "openai" or "mock"))
+        return Results.BadRequest(new { error = "Provider must be 'gemini', 'openai', or 'mock'." });
+
+    var model = string.IsNullOrWhiteSpace(req.Model)
+        ? (normProvider == "gemini" ? "gemini-2.5-flash" : normProvider == "openai" ? "gpt-4o-mini" : "mock-v1")
+        : req.Model.Trim();
+
+    var novel = await db.Novels
+        .Include(n => n.Segments)
+        .FirstOrDefaultAsync(n => n.Id == req.NovelId && n.OwnerId == user.Id, ct);
+
+    if (novel == null)
+        return Results.NotFound(new { error = "Novel not found or access denied." });
+
+    if (novel.Segments.Count == 0)
+        return Results.BadRequest(new { error = "Novel has no segments to translate." });
+
+    var job = new TranslationJob
+    {
+        Id = Guid.NewGuid(),
+        OwnerId = user.Id,
+        NovelId = novel.Id,
+        TargetLanguage = targetLang,
+        Provider = normProvider,
+        Model = model,
+        Status = JobStatus.Queued,
+        TotalSegments = novel.Segments.Count,
+        CompletedSegments = 0,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow
+    };
+
+    var translatedSegments = novel.Segments
+        .OrderBy(s => s.Order)
+        .Select(s => new TranslatedSegment
+        {
+            Id = Guid.NewGuid(),
+            JobId = job.Id,
+            SegmentId = s.Id,
+            Order = s.Order,
+            SourceText = s.Content,
+            Status = SegmentStatus.Pending,
+            UpdatedAt = DateTime.UtcNow
+        })
+        .ToList();
+
+    foreach (var ts in translatedSegments)
+    {
+        job.TranslatedSegments.Add(ts);
+    }
+
+    db.TranslationJobs.Add(job);
+    db.TranslatedSegments.AddRange(translatedSegments);
+    await db.SaveChangesAsync(ct);
+
+    return Results.Created($"/api/translations/{job.Id}", new
+    {
+        id = job.Id,
+        novelId = job.NovelId,
+        targetLanguage = job.TargetLanguage,
+        provider = job.Provider,
+        model = job.Model,
+        status = job.Status.ToString(),
+        totalSegments = job.TotalSegments,
+        completedSegments = job.CompletedSegments,
+        createdAt = job.CreatedAt
+    });
+}).RequireAuthorization();
+
+// GET /api/translations — lists all translation jobs for current user
+app.MapGet("/api/translations", async (
+    HttpContext ctx,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    CancellationToken ct) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var jobs = await db.TranslationJobs
+        .Where(j => j.OwnerId == user.Id)
+        .OrderByDescending(j => j.CreatedAt)
+        .Select(j => new
+        {
+            id = j.Id,
+            novelId = j.NovelId,
+            targetLanguage = j.TargetLanguage,
+            provider = j.Provider,
+            model = j.Model,
+            status = j.Status.ToString(),
+            totalSegments = j.TotalSegments,
+            completedSegments = j.CompletedSegments,
+            errorMessage = j.ErrorMessage,
+            createdAt = j.CreatedAt,
+            updatedAt = j.UpdatedAt
+        })
+        .ToListAsync(ct);
+
+    return Results.Ok(jobs);
+}).RequireAuthorization();
+
+// GET /api/translations/{id:guid} — gets details and segments of a translation job
+app.MapGet("/api/translations/{id:guid}", async (
+    HttpContext ctx,
+    Guid id,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    CancellationToken ct) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var job = await db.TranslationJobs
+        .Include(j => j.TranslatedSegments)
+        .FirstOrDefaultAsync(j => j.Id == id && j.OwnerId == user.Id, ct);
+
+    if (job == null)
+        return Results.NotFound(new { error = "Translation job not found." });
+
+    return Results.Ok(new
+    {
+        id = job.Id,
+        novelId = job.NovelId,
+        targetLanguage = job.TargetLanguage,
+        provider = job.Provider,
+        model = job.Model,
+        status = job.Status.ToString(),
+        totalSegments = job.TotalSegments,
+        completedSegments = job.CompletedSegments,
+        errorMessage = job.ErrorMessage,
+        createdAt = job.CreatedAt,
+        updatedAt = job.UpdatedAt,
+        segments = job.TranslatedSegments
+            .OrderBy(s => s.Order)
+            .Select(s => new
+            {
+                id = s.Id,
+                segmentId = s.SegmentId,
+                order = s.Order,
+                sourceText = s.SourceText,
+                translatedText = s.TranslatedText,
+                status = s.Status.ToString(),
+                errorMessage = s.ErrorMessage
+            })
+            .ToList()
+    });
+}).RequireAuthorization();
+
+// POST /api/translations/{id:guid}/cancel — cancels an in-progress or queued translation job
+app.MapPost("/api/translations/{id:guid}/cancel", async (
+    HttpContext ctx,
+    Guid id,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    IAntiforgery antiforgery,
+    CancellationToken ct) =>
+{
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var job = await db.TranslationJobs
+        .FirstOrDefaultAsync(j => j.Id == id && j.OwnerId == user.Id, ct);
+
+    if (job == null)
+        return Results.NotFound(new { error = "Translation job not found." });
+
+    if (job.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
+        return Results.BadRequest(new { error = $"Cannot cancel job in '{job.Status}' status." });
+
+    job.Status = JobStatus.Cancelled;
+    job.UpdatedAt = DateTime.UtcNow;
+    await db.SaveChangesAsync(ct);
+
+    return Results.Ok(new { id = job.Id, status = job.Status.ToString() });
+}).RequireAuthorization();
+
 // ======================================================================
 // Test Support Endpoints (Testing environment only)
 // ======================================================================
@@ -423,3 +895,5 @@ app.Run();
 public partial class Program { }
 
 public record TestSignInRequest(string GoogleId);
+public record SetApiKeyRequest(string Provider, string ApiKey);
+public record CreateTranslationRequest(Guid NovelId, string TargetLanguage, string Provider, string? Model);

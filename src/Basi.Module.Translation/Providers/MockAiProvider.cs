@@ -43,8 +43,29 @@ public class MockAiProvider : IAiProvider
         var promptTokens = EstimateTokens(request.SystemPrompt) + EstimateTokens(request.UserPrompt);
         var completionTokens = 150; // Realistic mock count
 
+        string content;
+        var segMatches = System.Text.RegularExpressions.Regex.Matches(
+            request.UserPrompt,
+            @"\[SEG:(\d+)\]\s*([^\r\n]+)");
+
+        if (segMatches.Count > 0)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (System.Text.RegularExpressions.Match match in segMatches)
+            {
+                var order = match.Groups[1].Value;
+                var text = match.Groups[2].Value.Trim();
+                sb.AppendLine($"[SEG:{order}] [Translated] {text}");
+            }
+            content = sb.ToString().TrimEnd();
+        }
+        else
+        {
+            content = "This is a translated segment. [seg-001] The hero ventured into the dark forest. [seg-002] A mysterious voice echoed through the trees.";
+        }
+
         var response = new AiResponse(
-            Content: "This is a translated segment. [seg-001] The hero ventured into the dark forest. [seg-002] A mysterious voice echoed through the trees.",
+            Content: content,
             PromptTokens: promptTokens,
             CompletionTokens: completionTokens,
             TotalTokens: promptTokens + completionTokens,

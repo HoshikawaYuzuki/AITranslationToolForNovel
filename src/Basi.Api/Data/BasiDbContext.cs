@@ -14,6 +14,8 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
 
     public DbSet<Novel> Novels => Set<Novel>();
     public DbSet<Segment> Segments => Set<Segment>();
+    public DbSet<TranslationJob> TranslationJobs => Set<TranslationJob>();
+    public DbSet<TranslatedSegment> TranslatedSegments => Set<TranslatedSegment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -50,6 +52,46 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
             b.HasOne(s => s.Novel)
              .WithMany(n => n.Segments)
              .HasForeignKey(s => s.NovelId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- TranslationJob ----
+        modelBuilder.Entity<TranslationJob>(b =>
+        {
+            b.HasKey(j => j.Id);
+            b.Property(j => j.TargetLanguage).HasMaxLength(32).IsRequired();
+            b.Property(j => j.Provider).HasMaxLength(64).IsRequired();
+            b.Property(j => j.Model).HasMaxLength(128).IsRequired();
+            b.Property(j => j.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(j => j.CreatedAt).HasDefaultValueSql("now()");
+            b.Property(j => j.UpdatedAt).HasDefaultValueSql("now()");
+            b.HasIndex(j => j.OwnerId);
+            b.HasIndex(j => j.Status);
+            b.HasOne<ApplicationUser>()
+             .WithMany()
+             .HasForeignKey(j => j.OwnerId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(j => j.Novel)
+             .WithMany()
+             .HasForeignKey(j => j.NovelId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- TranslatedSegment ----
+        modelBuilder.Entity<TranslatedSegment>(b =>
+        {
+            b.HasKey(ts => ts.Id);
+            b.Property(ts => ts.SourceText).IsRequired();
+            b.Property(ts => ts.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(ts => ts.UpdatedAt).HasDefaultValueSql("now()");
+            b.HasIndex(ts => new { ts.JobId, ts.Order });
+            b.HasOne(ts => ts.Job)
+             .WithMany(j => j.TranslatedSegments)
+             .HasForeignKey(ts => ts.JobId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(ts => ts.Segment)
+             .WithMany()
+             .HasForeignKey(ts => ts.SegmentId)
              .OnDelete(DeleteBehavior.Cascade);
         });
     }
