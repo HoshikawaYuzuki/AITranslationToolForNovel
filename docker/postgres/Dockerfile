@@ -1,12 +1,17 @@
 # Builder stage to compile native C su-exec as drop-in replacement for gosu
-FROM debian:13-slim AS builder
+FROM debian:trixie-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev
 COPY su-exec.c /tmp/su-exec.c
 RUN gcc -Wall -O2 /tmp/su-exec.c -o /tmp/gosu && strip /tmp/gosu
 
 # Hardened PostgreSQL 17 on Debian 13 Slim (Trixie)
-FROM debian:13-slim
+FROM debian:trixie-slim
+
+LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie-slim" \
+      org.opencontainers.image.title="basi-postgres" \
+      org.opencontainers.image.description="Hardened PostgreSQL 17 on Debian 13 Slim (Trixie)" \
+      org.opencontainers.image.version="17-trixie"
 
 ENV PG_MAJOR=17 \
     PGDATA=/var/lib/postgresql/data \

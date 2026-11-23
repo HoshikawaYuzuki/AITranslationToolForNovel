@@ -3,6 +3,10 @@ services:
     build:
       context: ./docker/postgres
       dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.base.name: "docker.io/library/debian:trixie-slim"
+        org.opencontainers.image.title: "basi-postgres"
+        org.opencontainers.image.version: "17-trixie"
     image: basi-postgres:17-trixie
     container_name: basi-postgres
     ports:
