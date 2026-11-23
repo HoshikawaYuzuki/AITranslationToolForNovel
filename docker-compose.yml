@@ -1,9 +1,6 @@
 services:
   postgres:
-    build:
-      context: ./docker/postgres
-      dockerfile: Dockerfile
-    image: basi-postgres:latest
+    image: postgres:17-trixie
     container_name: basi-postgres
     ports:
       - "5433:5432"
