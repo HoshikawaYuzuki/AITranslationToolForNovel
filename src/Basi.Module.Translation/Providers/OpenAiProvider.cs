@@ -131,6 +131,9 @@ public sealed class OpenAiProvider : IAiProvider
                 _ => FinishReason.Error
             };
 
+            var actualModel = doc.RootElement.TryGetProperty("model", out var modelEl) ? modelEl.GetString() : null;
+            var effectiveModel = !string.IsNullOrWhiteSpace(actualModel) ? actualModel : model;
+
             if (finishReason == FinishReason.ContentFiltered)
             {
                 throw new AiProviderError(
@@ -139,7 +142,7 @@ public sealed class OpenAiProvider : IAiProvider
                     promptTokens: promptTokens,
                     completionTokens: completionTokens,
                     totalTokens: totalTokens,
-                    modelUsed: model);
+                    modelUsed: effectiveModel);
             }
 
             if (finishReason == FinishReason.Error)
@@ -150,7 +153,7 @@ public sealed class OpenAiProvider : IAiProvider
                     promptTokens: promptTokens,
                     completionTokens: completionTokens,
                     totalTokens: totalTokens,
-                    modelUsed: model);
+                    modelUsed: effectiveModel);
             }
 
             var contentText = string.Empty;
@@ -165,7 +168,7 @@ public sealed class OpenAiProvider : IAiProvider
                 PromptTokens: promptTokens,
                 CompletionTokens: completionTokens,
                 TotalTokens: totalTokens,
-                ModelUsed: model,
+                ModelUsed: effectiveModel,
                 FinishReason: finishReason
             );
         }

@@ -21,6 +21,7 @@ public sealed class TranslationQueueWorker : BackgroundService
     private const int MaxBatchChars = 3000;
     private const int MaxSingleSegmentChars = 12000;
     private const int MaxContextChars = 1500;
+    private const int MaxJobTotalTokens = 100_000;
     private static readonly TimeSpan LeaseTimeout = TimeSpan.FromMinutes(5);
 
     public TranslationQueueWorker(
@@ -173,6 +174,7 @@ public sealed class TranslationQueueWorker : BackgroundService
                 }
                 job.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
+                apiKeyVault.RemoveJobKey(job.Id);
                 return true;
             }
 
@@ -184,6 +186,18 @@ public sealed class TranslationQueueWorker : BackgroundService
             {
                 if (ct.IsCancellationRequested || jobCts.IsCancellationRequested) break;
 
+                // F07: Job-wide token budget bound
+                if (job.TotalTokens >= MaxJobTotalTokens)
+                {
+                    _logger.LogWarning("Job {JobId} exceeded total token budget ({Budget}). Halting further batches.", job.Id, MaxJobTotalTokens);
+                    job.Status = JobStatus.Failed;
+                    job.ErrorMessage = $"Job exceeded total token budget of {MaxJobTotalTokens:N0} tokens.";
+                    job.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(ct);
+                    apiKeyVault.RemoveJobKey(job.Id);
+                    return true;
+                }
+
                 // In-flight check if job was cancelled concurrently by user
                 var currentStatus = await db.TranslationJobs
                     .Where(j => j.Id == job.Id)
@@ -193,6 +207,7 @@ public sealed class TranslationQueueWorker : BackgroundService
                 if (currentStatus == JobStatus.Cancelled || jobCts.IsCancellationRequested)
                 {
                     _logger.LogInformation("Job {JobId} was cancelled by user.", job.Id);
+                    apiKeyVault.RemoveJobKey(job.Id);
                     return true;
                 }
 
@@ -280,6 +295,8 @@ public sealed class TranslationQueueWorker : BackgroundService
                 {
                     var provider = providerFactory.GetProviderForJob(job.OwnerId, job.Provider, job.Id);
 
+                    job.RequestCount++;
+
                     var batchResult = await translationEngine.TranslateBatchAsync(
                         provider,
                         job.Model,
@@ -289,13 +306,13 @@ public sealed class TranslationQueueWorker : BackgroundService
                         contextHistory,
                         jobCts.Token);
 
-                    // F05: Accumulate usage tokens and persist actual model used
+                    // F05: Accumulate usage tokens and persist actual model without overwriting requested model
                     job.PromptTokens += batchResult.PromptTokens;
                     job.CompletionTokens += batchResult.CompletionTokens;
                     job.TotalTokens += batchResult.TotalTokens;
                     if (!string.IsNullOrWhiteSpace(batchResult.ModelUsed))
                     {
-                        job.Model = batchResult.ModelUsed;
+                        job.ActualModel = batchResult.ModelUsed;
                     }
 
                     foreach (var seg in batch)
@@ -320,6 +337,7 @@ public sealed class TranslationQueueWorker : BackgroundService
                     job.Status = JobStatus.Cancelled;
                     job.UpdatedAt = DateTime.UtcNow;
                     await db.SaveChangesAsync(CancellationToken.None);
+                    apiKeyVault.RemoveJobKey(job.Id);
                     return true;
                 }
                 catch (AiProviderError ex) when (ex.ErrorCode == AiErrorCode.InvalidApiKey)
@@ -334,13 +352,13 @@ public sealed class TranslationQueueWorker : BackgroundService
                 }
                 catch (TranslationBatchException ex)
                 {
-                    // F05: Record usage tokens consumed by failed/truncated request!
+                    // F05: Record usage tokens and actual model consumed by failed/truncated request!
                     job.PromptTokens += ex.PromptTokens;
                     job.CompletionTokens += ex.CompletionTokens;
                     job.TotalTokens += ex.TotalTokens;
                     if (!string.IsNullOrWhiteSpace(ex.ModelUsed))
                     {
-                        job.Model = ex.ModelUsed;
+                        job.ActualModel = ex.ModelUsed;
                     }
 
                     var sanitizedError = SanitizeErrorMessage(ex.Message);
@@ -410,6 +428,16 @@ public sealed class TranslationQueueWorker : BackgroundService
         }
         finally
         {
+            var finalStatus = await db.TranslationJobs
+                .Where(j => j.Id == candidate.Id)
+                .Select(j => j.Status)
+                .FirstOrDefaultAsync(CancellationToken.None);
+
+            if (finalStatus is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
+            {
+                apiKeyVault.RemoveJobKey(candidate.Id);
+            }
+
             _activeJobClaims.TryRemove(candidate.Id, out _);
         }
     }

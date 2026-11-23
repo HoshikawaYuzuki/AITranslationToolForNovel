@@ -19,6 +19,12 @@ public sealed class TranslationJob
     /// <summary>AI model identifier, e.g. "gemini-2.5-flash", "gpt-4o-mini".</summary>
     public string Model { get; set; } = string.Empty;
 
+    /// <summary>Actual AI model version returned in provider responses.</summary>
+    public string? ActualModel { get; set; }
+
+    /// <summary>Number of AI provider batch requests executed for this job.</summary>
+    public int RequestCount { get; set; }
+
     /// <summary>Current lifecycle status.</summary>
     public JobStatus Status { get; set; } = JobStatus.Created;
 

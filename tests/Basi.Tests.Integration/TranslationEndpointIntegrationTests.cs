@@ -678,4 +678,276 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
             Assert.False(vault.HasKey(user.Id, "gemini"));
         }
     }
+
+    [Fact]
+    public async Task CancelJob_QueuedStatus_RemovesJobKeyImmediatelyFromRam()
+    {
+        var (novelId, _, googleId, email) = await SeedNovelAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/translations")
+        {
+            Content = JsonContent.Create(new
+            {
+                novelId,
+                targetLanguage = "vi",
+                provider = "mock",
+                model = "mock-v1",
+                apiKey = "queued-key-12345"
+            })
+        };
+        req.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+
+        var json = await res.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var jobId = Guid.Parse(doc.RootElement.GetProperty("id").GetString()!);
+
+        // Cancel job
+        var cancelReq = new HttpRequestMessage(HttpMethod.Post, $"/api/translations/{jobId}/cancel");
+        cancelReq.Headers.Add("X-XSRF-TOKEN", token);
+
+        var cancelRes = await client.SendAsync(cancelReq);
+        Assert.Equal(HttpStatusCode.OK, cancelRes.StatusCode);
+
+        // Verify key is immediately purged from RAM
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var vault = scope.ServiceProvider.GetRequiredService<Basi.Module.Translation.Services.IApiKeyVault>();
+            Assert.False(vault.HasJobKey(jobId));
+        }
+    }
+
+    [Fact]
+    public async Task SetJobApiKey_WhenWaitingForApiKey_WakesJobAndTransitionsToQueued()
+    {
+        var (novelId, ownerId, googleId, email) = await SeedNovelAsync();
+
+        // Seed a job in WaitingForApiKey status
+        Guid jobId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job = new TranslationJob
+            {
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                Provider = "gemini",
+                Model = "gemini-2.5-flash",
+                Status = JobStatus.WaitingForApiKey,
+                TotalSegments = 1,
+                CompletedSegments = 0
+            };
+            db.TranslationJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        // Call POST /api/translations/{id}/api-key to supply key and wake the job
+        var setKeyReq = new HttpRequestMessage(HttpMethod.Post, $"/api/translations/{jobId}/api-key")
+        {
+            Content = JsonContent.Create(new { apiKey = "AIzaSyResumedKey123" })
+        };
+        setKeyReq.Headers.Add("X-XSRF-TOKEN", token);
+
+        var setKeyRes = await client.SendAsync(setKeyReq);
+        Assert.Equal(HttpStatusCode.OK, setKeyRes.StatusCode);
+
+        // Verify DB job transitioned to Queued
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var updatedJob = await db.TranslationJobs.FindAsync(jobId);
+            Assert.NotNull(updatedJob);
+            Assert.Equal(JobStatus.Queued, updatedJob.Status);
+            Assert.Null(updatedJob.ErrorMessage);
+
+            var vault = scope.ServiceProvider.GetRequiredService<Basi.Module.Translation.Services.IApiKeyVault>();
+            Assert.True(vault.HasJobKey(jobId));
+            Assert.Equal("AIzaSyResumedKey123", vault.GetJobKey(ownerId, jobId));
+        }
+    }
+
+    [Fact]
+    public async Task TwoJobs_SameUser_DifferentKeys_ReEntryOnlyWakesTargetJob()
+    {
+        var (novelId, ownerId, googleId, email) = await SeedNovelAsync();
+
+        Guid job1Id;
+        Guid job2Id;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job1 = new TranslationJob
+            {
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                Provider = "gemini",
+                Model = "gemini-2.5-flash",
+                Status = JobStatus.WaitingForApiKey,
+                TotalSegments = 1
+            };
+            var job2 = new TranslationJob
+            {
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "en",
+                Provider = "openai",
+                Model = "gpt-4o-mini",
+                Status = JobStatus.WaitingForApiKey,
+                TotalSegments = 1
+            };
+            db.TranslationJobs.AddRange(job1, job2);
+            await db.SaveChangesAsync();
+            job1Id = job1.Id;
+            job2Id = job2.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        // Re-enter key ONLY for job1
+        var setKeyReq = new HttpRequestMessage(HttpMethod.Post, $"/api/translations/{job1Id}/api-key")
+        {
+            Content = JsonContent.Create(new { apiKey = "key-for-job-1" })
+        };
+        setKeyReq.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(setKeyReq);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        // Verify job1 is Queued with key, while job2 remains WaitingForApiKey without key!
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var dbJob1 = await db.TranslationJobs.FindAsync(job1Id);
+            var dbJob2 = await db.TranslationJobs.FindAsync(job2Id);
+
+            Assert.Equal(JobStatus.Queued, dbJob1!.Status);
+            Assert.Equal(JobStatus.WaitingForApiKey, dbJob2!.Status);
+
+            var vault = scope.ServiceProvider.GetRequiredService<Basi.Module.Translation.Services.IApiKeyVault>();
+            Assert.True(vault.HasJobKey(job1Id));
+            Assert.Equal("key-for-job-1", vault.GetJobKey(ownerId, job1Id));
+
+            Assert.False(vault.HasJobKey(job2Id));
+        }
+    }
+
+    [Fact]
+    public async Task SetJobApiKey_DifferentUser_ReturnsNotFound()
+    {
+        var (novelId, ownerId, _, _) = await SeedNovelAsync();
+
+        Guid jobId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job = new TranslationJob
+            {
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                Provider = "gemini",
+                Model = "gemini-2.5-flash",
+                Status = JobStatus.WaitingForApiKey,
+                TotalSegments = 1
+            };
+            db.TranslationJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        // Another user attempts to set key
+        var attackerGoogleId = $"google-attacker-{Guid.NewGuid():N}";
+        var attackerEmail = $"attacker-{Guid.NewGuid():N}@example.com";
+        await _factory.SeedUserAsync(attackerGoogleId, attackerEmail, "Attacker User");
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", attackerGoogleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", attackerEmail);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/translations/{jobId}/api-key")
+        {
+            Content = JsonContent.Create(new { apiKey = "attacker-key" })
+        };
+        req.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Translation_RecordsRequestCountAndActualModel_WithoutOverwritingModel()
+    {
+        var (novelId, _, googleId, email) = await SeedNovelAsync(segmentCount: 3);
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/translations")
+        {
+            Content = JsonContent.Create(new
+            {
+                novelId,
+                targetLanguage = "vi",
+                provider = "mock",
+                model = "requested-model-v1"
+            })
+        };
+        req.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+
+        var json = await res.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var jobId = Guid.Parse(doc.RootElement.GetProperty("id").GetString()!);
+
+        // Poll until Completed
+        var maxAttempts = 30;
+        var status = "Queued";
+        JsonDocument? finalDoc = null;
+        while (maxAttempts-- > 0 && status != "Completed" && status != "Failed")
+        {
+            await Task.Delay(200);
+            var pollRes = await client.GetAsync($"/api/translations/{jobId}");
+            var pollJson = await pollRes.Content.ReadAsStringAsync();
+            finalDoc?.Dispose();
+            finalDoc = JsonDocument.Parse(pollJson);
+            status = finalDoc.RootElement.GetProperty("status").GetString()!;
+        }
+
+        Assert.NotNull(finalDoc);
+        using (finalDoc)
+        {
+            var root = finalDoc.RootElement;
+            Assert.Equal("Completed", root.GetProperty("status").GetString());
+            // Requested model is preserved
+            Assert.Equal("requested-model-v1", root.GetProperty("model").GetString());
+            // Request count is tracked
+            Assert.True(root.GetProperty("requestCount").GetInt32() >= 1);
+        }
+    }
 }

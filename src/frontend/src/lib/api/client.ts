@@ -50,6 +50,8 @@ export interface TranslationJobSummary {
   targetLanguage: string;
   provider: string;
   model: string;
+  actualModel?: string | null;
+  requestCount?: number;
   status: 'Created' | 'Queued' | 'Processing' | 'WaitingForApiKey' | 'Completed' | 'Failed' | 'Cancelled';
   totalSegments: number;
   completedSegments: number;
@@ -190,7 +192,8 @@ export async function createTranslationJob(
   novelId: string,
   targetLanguage: string,
   provider: string,
-  model?: string
+  model?: string,
+  apiKey?: string
 ): Promise<TranslationJobSummary> {
   const { token, headerName } = await getAntiforgeryToken();
   const res = await fetch(`${API_BASE}/translations`, {
@@ -200,10 +203,37 @@ export async function createTranslationJob(
       'Content-Type': 'application/json',
       [headerName]: token,
     },
-    body: JSON.stringify({ novelId, targetLanguage, provider, model }),
+    body: JSON.stringify({
+      novelId,
+      targetLanguage,
+      provider,
+      model,
+      apiKey: apiKey || undefined,
+    }),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => 'Failed to submit translation');
+    throw new Error(err);
+  }
+  return res.json();
+}
+
+export async function setJobApiKey(
+  jobId: string,
+  apiKey: string
+): Promise<{ id: string; status: string }> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/translations/${encodeURIComponent(jobId)}/api-key`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      [headerName]: token,
+    },
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Failed to set API key for job');
     throw new Error(err);
   }
   return res.json();

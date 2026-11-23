@@ -154,6 +154,9 @@ public sealed class GeminiProvider : IAiProvider
                 _ => FinishReason.Error
             };
 
+            var actualModel = doc.RootElement.TryGetProperty("modelVersion", out var mvEl) ? mvEl.GetString() : null;
+            var effectiveModel = !string.IsNullOrWhiteSpace(actualModel) ? actualModel : model;
+
             if (finishReason == FinishReason.ContentFiltered)
             {
                 throw new AiProviderError(
@@ -162,7 +165,7 @@ public sealed class GeminiProvider : IAiProvider
                     promptTokens: promptTokens,
                     completionTokens: completionTokens,
                     totalTokens: totalTokens,
-                    modelUsed: model);
+                    modelUsed: effectiveModel);
             }
 
             if (finishReason == FinishReason.Error)
@@ -173,7 +176,7 @@ public sealed class GeminiProvider : IAiProvider
                     promptTokens: promptTokens,
                     completionTokens: completionTokens,
                     totalTokens: totalTokens,
-                    modelUsed: model);
+                    modelUsed: effectiveModel);
             }
 
             var contentText = string.Empty;
@@ -197,7 +200,7 @@ public sealed class GeminiProvider : IAiProvider
                 PromptTokens: promptTokens,
                 CompletionTokens: completionTokens,
                 TotalTokens: totalTokens,
-                ModelUsed: model,
+                ModelUsed: effectiveModel,
                 FinishReason: finishReason
             );
         }

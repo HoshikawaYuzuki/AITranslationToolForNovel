@@ -13,8 +13,11 @@ public sealed class InMemoryApiKeyVault : IApiKeyVault
     // userId -> (normalizedProvider -> apiKey)
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, string>> _vault = new();
 
-    // jobId -> apiKey (Job-bound RAM keys)
-    private readonly ConcurrentDictionary<Guid, string> _jobKeys = new();
+    // jobId -> (userId, apiKey)
+    private readonly ConcurrentDictionary<Guid, (Guid UserId, string ApiKey)> _jobKeys = new();
+
+    // userId -> ConcurrentDictionary<jobId, byte>
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<Guid, byte>> _userJobs = new();
 
     public void SetKey(Guid userId, string provider, string apiKey)
     {
@@ -74,17 +77,36 @@ public sealed class InMemoryApiKeyVault : IApiKeyVault
     public void ClearAll(Guid userId)
     {
         _vault.TryRemove(userId, out _);
+        RemoveJobKeysForUser(userId);
+    }
+
+    public void SetJobKey(Guid userId, Guid jobId, string apiKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        _jobKeys[jobId] = (userId, apiKey.Trim());
+        _userJobs.GetOrAdd(userId, _ => new ConcurrentDictionary<Guid, byte>()).TryAdd(jobId, 0);
     }
 
     public void SetJobKey(Guid jobId, string apiKey)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
-        _jobKeys[jobId] = apiKey.Trim();
+        SetJobKey(Guid.Empty, jobId, apiKey);
     }
 
     public string? GetJobKey(Guid jobId)
     {
-        return _jobKeys.TryGetValue(jobId, out var key) ? key : null;
+        return _jobKeys.TryGetValue(jobId, out var entry) ? entry.ApiKey : null;
+    }
+
+    public string? GetJobKey(Guid userId, Guid jobId)
+    {
+        if (_jobKeys.TryGetValue(jobId, out var entry))
+        {
+            if (entry.UserId == Guid.Empty || entry.UserId == userId)
+            {
+                return entry.ApiKey;
+            }
+        }
+        return null;
     }
 
     public bool HasJobKey(Guid jobId)
@@ -94,7 +116,26 @@ public sealed class InMemoryApiKeyVault : IApiKeyVault
 
     public bool RemoveJobKey(Guid jobId)
     {
-        return _jobKeys.TryRemove(jobId, out _);
+        if (_jobKeys.TryRemove(jobId, out var entry))
+        {
+            if (entry.UserId != Guid.Empty && _userJobs.TryGetValue(entry.UserId, out var set))
+            {
+                set.TryRemove(jobId, out _);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    public void RemoveJobKeysForUser(Guid userId)
+    {
+        if (_userJobs.TryRemove(userId, out var jobs))
+        {
+            foreach (var jobId in jobs.Keys)
+            {
+                _jobKeys.TryRemove(jobId, out _);
+            }
+        }
     }
 
     private static string NormalizeProvider(string provider) => provider.Trim().ToLowerInvariant();

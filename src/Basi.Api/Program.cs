@@ -264,6 +264,7 @@ app.MapPost("/api/auth/logout", async (
             foreach (var jId in activeJobIds)
             {
                 cancellationRegistry.TryCancelJob(jId);
+                keyVault.RemoveJobKey(jId);
             }
         }
     }
@@ -387,6 +388,7 @@ app.MapDelete("/api/auth/api-keys/{provider}", async (
     foreach (var jId in activeJobIds)
     {
         cancellationRegistry.TryCancelJob(jId);
+        keyVault.RemoveJobKey(jId);
     }
 
     return Results.Ok(new { success = removed, provider = provider.ToLowerInvariant() });
@@ -619,6 +621,8 @@ app.MapGet("/api/novels/{id:guid}/translations", async (
             targetLanguage = j.TargetLanguage,
             provider = j.Provider,
             model = j.Model,
+            actualModel = j.ActualModel,
+            requestCount = j.RequestCount,
             status = j.Status.ToString(),
             totalSegments = j.TotalSegments,
             completedSegments = j.CompletedSegments,
@@ -734,14 +738,26 @@ app.MapPost("/api/translations", async (
         job.TranslatedSegments.Add(ts);
     }
 
-    db.TranslationJobs.Add(job);
-    db.TranslatedSegments.AddRange(translatedSegments);
-    await db.SaveChangesAsync(ct);
-
-    // F04: If client provides a Job-bound API key, store in RAM vault keyed to this specific Job
-    if (!string.IsNullOrWhiteSpace(req.ApiKey))
+    // F04-C: Store Job-bound key in RAM vault BEFORE publishing job as Queued to eliminate race condition
+    var hasJobKey = !string.IsNullOrWhiteSpace(req.ApiKey);
+    if (hasJobKey)
     {
-        keyVault.SetJobKey(job.Id, req.ApiKey.Trim());
+        keyVault.SetJobKey(user.Id, job.Id, req.ApiKey!.Trim());
+    }
+
+    try
+    {
+        db.TranslationJobs.Add(job);
+        db.TranslatedSegments.AddRange(translatedSegments);
+        await db.SaveChangesAsync(ct);
+    }
+    catch
+    {
+        if (hasJobKey)
+        {
+            keyVault.RemoveJobKey(job.Id);
+        }
+        throw;
     }
 
     return Results.Created($"/api/translations/{job.Id}", new
@@ -751,6 +767,8 @@ app.MapPost("/api/translations", async (
         targetLanguage = job.TargetLanguage,
         provider = job.Provider,
         model = job.Model,
+        actualModel = job.ActualModel,
+        requestCount = job.RequestCount,
         status = job.Status.ToString(),
         totalSegments = job.TotalSegments,
         completedSegments = job.CompletedSegments,
@@ -784,6 +802,8 @@ app.MapGet("/api/translations", async (
             targetLanguage = j.TargetLanguage,
             provider = j.Provider,
             model = j.Model,
+            actualModel = j.ActualModel,
+            requestCount = j.RequestCount,
             status = j.Status.ToString(),
             totalSegments = j.TotalSegments,
             completedSegments = j.CompletedSegments,
@@ -830,6 +850,8 @@ app.MapGet("/api/translations/{id:guid}", async (
         targetLanguage = job.TargetLanguage,
         provider = job.Provider,
         model = job.Model,
+        actualModel = job.ActualModel,
+        requestCount = job.RequestCount,
         status = job.Status.ToString(),
         totalSegments = job.TotalSegments,
         completedSegments = job.CompletedSegments,
@@ -862,6 +884,7 @@ app.MapPost("/api/translations/{id:guid}/cancel", async (
     BasiDbContext db,
     UserManager<ApplicationUser> userManager,
     Basi.Core.Interfaces.IJobCancellationRegistry cancellationRegistry,
+    IApiKeyVault keyVault,
     IAntiforgery antiforgery,
     CancellationToken ct) =>
 {
@@ -895,9 +918,68 @@ app.MapPost("/api/translations/{id:guid}/cancel", async (
     // F08: Cancel in-flight AI provider call immediately via cancellation registry
     cancellationRegistry.TryCancelJob(id);
 
+    // F04-A: Purge Job-bound key from RAM immediately upon cancel
+    keyVault.RemoveJobKey(id);
+
     job.Status = JobStatus.Cancelled;
     job.UpdatedAt = DateTime.UtcNow;
     await db.SaveChangesAsync(ct);
+
+    return Results.Ok(new { id = job.Id, status = job.Status.ToString() });
+}).RequireAuthorization();
+
+// POST /api/translations/{id:guid}/api-key — sets/re-enters job-specific API key for a job (F04-B vertical slice)
+app.MapPost("/api/translations/{id:guid}/api-key", async (
+    HttpContext ctx,
+    Guid id,
+    SetJobApiKeyRequest req,
+    BasiDbContext db,
+    UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault,
+    IAntiforgery antiforgery,
+    CancellationToken ct) =>
+{
+    try
+    {
+        await antiforgery.ValidateRequestAsync(ctx);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    if (ctx.User.Identity?.IsAuthenticated != true)
+        return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(req.ApiKey))
+        return Results.BadRequest(new { error = "API key cannot be empty." });
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByLoginAsync("Google", googleId);
+    if (user is null) return Results.Unauthorized();
+
+    var job = await db.TranslationJobs
+        .FirstOrDefaultAsync(j => j.Id == id && j.OwnerId == user.Id, ct);
+
+    if (job == null)
+        return Results.NotFound(new { error = "Translation job not found." });
+
+    if (job.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
+        return Results.BadRequest(new { error = $"Cannot set API key for job in '{job.Status}' status." });
+
+    // Store key in RAM bound specifically to (user.Id, job.Id)
+    keyVault.SetJobKey(user.Id, job.Id, req.ApiKey.Trim());
+
+    // If job was waiting for API key, wake it up and requeue
+    if (job.Status == JobStatus.WaitingForApiKey)
+    {
+        job.Status = JobStatus.Queued;
+        job.ErrorMessage = null;
+        job.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
 
     return Results.Ok(new { id = job.Id, status = job.Status.ToString() });
 }).RequireAuthorization();
@@ -962,3 +1044,4 @@ public partial class Program { }
 public record TestSignInRequest(string GoogleId);
 public record SetApiKeyRequest(string Provider, string ApiKey);
 public record CreateTranslationRequest(Guid NovelId, string TargetLanguage, string Provider, string? Model, string? ApiKey = null);
+public record SetJobApiKeyRequest(string ApiKey);

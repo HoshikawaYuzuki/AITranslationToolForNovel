@@ -66,8 +66,8 @@ public sealed class AiProviderFactory : IAiProviderFactory
             return _serviceProvider.GetService<MockAiProvider>() ?? new MockAiProvider();
         }
 
-        // Job-bound key takes priority; fall back to session/user-bound key
-        var key = _apiKeyVault.GetJobKey(jobId) ?? _apiKeyVault.GetKey(userId, norm);
+        // Job-bound key takes priority (with ownership check); fall back to session/user-bound key
+        var key = _apiKeyVault.GetJobKey(userId, jobId) ?? _apiKeyVault.GetKey(userId, norm);
         if (string.IsNullOrWhiteSpace(key))
         {
             throw new AiProviderError(
