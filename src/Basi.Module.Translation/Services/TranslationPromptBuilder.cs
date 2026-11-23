@@ -76,6 +76,7 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         var expectedSet = expectedOrders.ToHashSet();
         var seenOrders = new HashSet<int>();
         var duplicateOrders = new List<int>();
+        var unexpectedOrders = new List<int>();
 
         var pattern = SegmentTagRegex();
         var matches = pattern.Matches(content);
@@ -92,6 +93,7 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
 
                 if (!expectedSet.Contains(order))
                 {
+                    unexpectedOrders.Add(order);
                     continue;
                 }
 
@@ -107,6 +109,12 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         {
             throw new InvalidOperationException(
                 $"Model response contained duplicate segment tags: {string.Join(", ", duplicateOrders.Distinct())}");
+        }
+
+        if (unexpectedOrders.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Model response contained unexpected segment tags: {string.Join(", ", unexpectedOrders.Distinct())}");
         }
 
         return result;

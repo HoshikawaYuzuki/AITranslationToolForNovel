@@ -272,21 +272,37 @@
     }
   }
 
-  let isRefreshingJob = false;
+  let inFlightRefreshJobId: string | null = null;
+  let queuedJobIdToRefresh: string | null = null;
 
   async function selectJob(id: string) {
     activeJobId = id;
-    await refreshActiveJob();
+    // R12 / F09: Reset activeJobDetail to the selected job's summary (if available in list)
+    // so readers never freeze or evaluate polling stop conditions using an old job's completed state!
+    const existingSummary = jobs.find(j => j.id === id);
+    activeJobDetail = existingSummary ? { ...existingSummary, segments: [] } : null;
+
     startPolling();
+    await triggerRefresh(id);
   }
 
   async function refreshActiveJob() {
-    if (!activeJobId || isRefreshingJob) return;
-    isRefreshingJob = true;
-    const targetId = activeJobId;
+    if (activeJobId) {
+      await triggerRefresh(activeJobId);
+    }
+  }
+
+  async function triggerRefresh(targetId: string) {
+    if (inFlightRefreshJobId !== null) {
+      // If a request is currently in-flight, queue targetId to be refreshed next
+      queuedJobIdToRefresh = targetId;
+      return;
+    }
+
+    inFlightRefreshJobId = targetId;
     try {
       const detail = await getTranslationJob(targetId);
-      // F09: Guard against race conditions and out-of-order responses when switching jobs
+      // Only apply if user hasn't switched away from this job
       if (activeJobId === targetId && detail) {
         activeJobDetail = detail;
         const idx = jobs.findIndex(j => j.id === targetId);
@@ -300,7 +316,12 @@
     } catch (e) {
       console.error('Failed to refresh job', e);
     } finally {
-      isRefreshingJob = false;
+      inFlightRefreshJobId = null;
+      if (queuedJobIdToRefresh !== null) {
+        const nextId = queuedJobIdToRefresh;
+        queuedJobIdToRefresh = null;
+        triggerRefresh(nextId);
+      }
     }
   }
 
@@ -317,7 +338,12 @@
   function startPolling() {
     stopPolling();
     jobPollingInterval = setInterval(() => {
-      if (activeJobDetail && (activeJobDetail.status === 'Queued' || activeJobDetail.status === 'Processing' || activeJobDetail.status === 'WaitingForApiKey')) {
+      if (!activeJobId) {
+        stopPolling();
+        return;
+      }
+      // If job detail is not yet loaded OR still in active progress, keep polling
+      if (!activeJobDetail || activeJobDetail.status === 'Queued' || activeJobDetail.status === 'Processing' || activeJobDetail.status === 'WaitingForApiKey') {
         refreshActiveJob();
       } else {
         stopPolling();

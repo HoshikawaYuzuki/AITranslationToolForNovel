@@ -111,15 +111,14 @@ public class TranslationPromptBuilderTests
     }
 
     [Fact]
-    public void ParseResponse_UnexpectedTag_IsIgnoredAndNotMapped()
+    public void ParseResponse_UnexpectedTag_ThrowsInvalidOperationException()
     {
-        // Segment 99 should not be accepted when batch expected only 0 and 1
+        // Segment 99 should be strictly rejected as contract violation when batch expected only 0 and 1
         var response = "[SEG:0] Câu 0 [SEG:99] Bất ngờ [SEG:1] Câu 1";
-        var parsed = _builder.ParseResponse(response, new[] { 0, 1 });
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _builder.ParseResponse(response, new[] { 0, 1 }));
 
-        Assert.Equal(2, parsed.Count);
-        Assert.True(parsed.ContainsKey(0));
-        Assert.True(parsed.ContainsKey(1));
-        Assert.False(parsed.ContainsKey(99));
+        Assert.Contains("unexpected segment tags", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("99", ex.Message);
     }
 }

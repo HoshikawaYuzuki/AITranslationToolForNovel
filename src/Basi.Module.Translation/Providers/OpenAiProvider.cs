@@ -106,12 +106,17 @@ public sealed class OpenAiProvider : IAiProvider
                 "stop" => FinishReason.Stop,
                 "length" => FinishReason.MaxTokens,
                 "content_filter" => FinishReason.ContentFiltered,
-                _ => FinishReason.Stop
+                _ => FinishReason.Error
             };
 
             if (finishReason == FinishReason.ContentFiltered)
             {
                 throw new AiProviderError(AiErrorCode.ContentFiltered, "OpenAI blocked the completion due to content safety policy.");
+            }
+
+            if (finishReason == FinishReason.Error)
+            {
+                throw new AiProviderError(AiErrorCode.Unknown, "OpenAI completion did not finish successfully.");
             }
 
             var contentText = string.Empty;

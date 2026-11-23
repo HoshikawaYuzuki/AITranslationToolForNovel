@@ -155,4 +155,32 @@ public class GeminiProviderTests
 
         Assert.DoesNotContain(canarySecret, ex.Message);
     }
+
+    [Fact]
+    public async Task CompleteAsync_Http200BlockReasonContainingCanary_DoesNotLeakCanaryInException()
+    {
+        // Audit repro R01: Upstream returns HTTP 200 with promptFeedback.blockReason containing canary
+        const string canarySecret = "BASI_AUDIT_FAKE_KEY_NOT_A_SECRET";
+        var responseJson = JsonSerializer.Serialize(new
+        {
+            promptFeedback = new
+            {
+                blockReason = canarySecret
+            }
+        });
+
+        var handler = new MockHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+        });
+
+        var client = new HttpClient(handler);
+        var provider = new GeminiProvider(client, "test-api-key");
+
+        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+            provider.CompleteAsync(new AiRequest("gemini-2.5-flash", "system", "prompt")));
+
+        Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
+        Assert.DoesNotContain(canarySecret, ex.Message);
+    }
 }

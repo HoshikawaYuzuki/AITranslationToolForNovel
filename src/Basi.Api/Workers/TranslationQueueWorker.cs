@@ -16,6 +16,8 @@ public sealed class TranslationQueueWorker : BackgroundService
     private readonly ILogger<TranslationQueueWorker> _logger;
     private const int MaxBatchSize = 5;
     private const int MaxBatchChars = 3000;
+    private const int MaxSingleSegmentChars = 12000;
+    private const int MaxContextChars = 1500;
 
     public TranslationQueueWorker(
         IServiceScopeFactory scopeFactory,
@@ -143,6 +145,22 @@ public sealed class TranslationQueueWorker : BackgroundService
             while (segmentIndex < pendingSegments.Count && batch.Count < MaxBatchSize)
             {
                 var candidate = pendingSegments[segmentIndex];
+
+                // F07: Single segment character bound check
+                if (candidate.SourceText.Length > MaxSingleSegmentChars)
+                {
+                    if (batch.Count == 0)
+                    {
+                        candidate.Status = SegmentStatus.Failed;
+                        candidate.ErrorMessage = $"Segment source text exceeds maximum supported length ({MaxSingleSegmentChars} characters).";
+                        candidate.UpdatedAt = DateTime.UtcNow;
+                        await db.SaveChangesAsync(ct);
+                        segmentIndex++;
+                        continue;
+                    }
+                    break;
+                }
+
                 var candidateChars = candidate.SourceText.Length;
                 if (batch.Count > 0 && accumulatedChars + candidateChars > MaxBatchChars)
                 {
@@ -152,6 +170,8 @@ public sealed class TranslationQueueWorker : BackgroundService
                 accumulatedChars += candidateChars;
                 segmentIndex++;
             }
+
+            if (batch.Count == 0) continue;
 
             // Verify API key is still valid and present in RAM vault before executing batch (F04)
             if (!string.Equals(job.Provider, "mock", StringComparison.OrdinalIgnoreCase))
@@ -175,15 +195,26 @@ public sealed class TranslationQueueWorker : BackgroundService
             }
             await db.SaveChangesAsync(ct);
 
-            // Fetch recent context (up to 3 completed prior segments)
+            // Fetch recent context with budget (F07: capped at MaxContextChars)
             var minOrder = batch[0].Order;
-            var contextHistory = await db.TranslatedSegments
+            var contextCandidates = await db.TranslatedSegments
                 .Where(ts => ts.JobId == job.Id && ts.Status == SegmentStatus.Completed && ts.Order < minOrder)
                 .OrderByDescending(ts => ts.Order)
                 .Take(3)
-                .OrderBy(ts => ts.Order)
                 .Select(ts => new ContextSegmentItem(ts.Order, ts.SourceText, ts.TranslatedText ?? string.Empty))
                 .ToListAsync(ct);
+
+            var contextHistory = new List<ContextSegmentItem>();
+            var totalContextChars = 0;
+            foreach (var ctx in contextCandidates)
+            {
+                if (totalContextChars + ctx.TranslatedText.Length <= MaxContextChars)
+                {
+                    contextHistory.Add(ctx);
+                    totalContextChars += ctx.TranslatedText.Length;
+                }
+            }
+            contextHistory.Reverse();
 
             var batchItems = batch.Select(b => new SegmentItem(b.Order, b.SourceText)).ToList();
 
@@ -231,10 +262,27 @@ public sealed class TranslationQueueWorker : BackgroundService
                 await db.SaveChangesAsync(ct);
                 return true;
             }
+            catch (TranslationBatchException ex)
+            {
+                // F05: Record usage tokens consumed by failed/truncated request!
+                job.PromptTokens += ex.PromptTokens;
+                job.CompletionTokens += ex.CompletionTokens;
+                job.TotalTokens += ex.TotalTokens;
+
+                var sanitizedError = SanitizeErrorMessage(ex.Message);
+                _logger.LogError("Failed to translate batch starting at order {Order} for job {JobId}: {ErrorMessage}", batch[0].Order, job.Id, sanitizedError);
+
+                foreach (var seg in batch)
+                {
+                    seg.Status = SegmentStatus.Failed;
+                    seg.ErrorMessage = sanitizedError;
+                    seg.UpdatedAt = DateTime.UtcNow;
+                }
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to translate batch starting at order {Order} for job {JobId}.", batch[0].Order, job.Id);
                 var sanitizedError = SanitizeErrorMessage(ex.Message);
+                _logger.LogError("Failed to translate batch starting at order {Order} for job {JobId}: {ErrorMessage}", batch[0].Order, job.Id, sanitizedError);
                 foreach (var seg in batch)
                 {
                     seg.Status = SegmentStatus.Failed;
@@ -289,10 +337,12 @@ public sealed class TranslationQueueWorker : BackgroundService
         if (string.IsNullOrWhiteSpace(rawMessage)) return "An error occurred during translation.";
         if (rawMessage.Contains("truncated", StringComparison.OrdinalIgnoreCase))
             return "Output was truncated due to token limit.";
-        if (rawMessage.Contains("content filter", StringComparison.OrdinalIgnoreCase))
+        if (rawMessage.Contains("content filter", StringComparison.OrdinalIgnoreCase) || rawMessage.Contains("safety", StringComparison.OrdinalIgnoreCase))
             return "Translation was blocked by safety policy.";
         if (rawMessage.Contains("duplicate segment", StringComparison.OrdinalIgnoreCase))
             return "Model returned duplicate segment identifiers.";
+        if (rawMessage.Contains("unexpected segment", StringComparison.OrdinalIgnoreCase))
+            return "Model returned unexpected segment identifiers.";
         if (rawMessage.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
             return "API rate limit exceeded. Please retry later.";
         if (rawMessage.Contains("API key", StringComparison.OrdinalIgnoreCase))

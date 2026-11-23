@@ -10,6 +10,23 @@ public record TranslationBatchResult(
     int TotalTokens,
     string ModelUsed);
 
+public class TranslationBatchException : Exception
+{
+    public int PromptTokens { get; }
+    public int CompletionTokens { get; }
+    public int TotalTokens { get; }
+    public string ModelUsed { get; }
+
+    public TranslationBatchException(string message, int promptTokens, int completionTokens, int totalTokens, string modelUsed)
+        : base(message)
+    {
+        PromptTokens = promptTokens;
+        CompletionTokens = completionTokens;
+        TotalTokens = totalTokens;
+        ModelUsed = modelUsed;
+    }
+}
+
 public interface ITranslationEngine
 {
     Task<TranslationBatchResult> TranslateBatchAsync(
@@ -64,18 +81,39 @@ public sealed class TranslationEngine : ITranslationEngine
 
         var response = await provider.CompleteAsync(request, ct);
 
-        // F03: Do not treat truncated outputs as successful completions
+        // F03 & R11: Only accept successful completion (FinishReason.Stop). Carry token usage in exception!
         if (response.FinishReason == FinishReason.MaxTokens)
         {
-            throw new AiProviderError(AiErrorCode.Unknown, "Model response was truncated because MaxTokens limit was reached.");
+            throw new TranslationBatchException(
+                "Model response was truncated because MaxTokens limit was reached.",
+                response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
         }
         if (response.FinishReason == FinishReason.ContentFiltered)
         {
-            throw new AiProviderError(AiErrorCode.ContentFiltered, "Model response was blocked by content filter.");
+            throw new TranslationBatchException(
+                "Model response was blocked by content filter.",
+                response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
+        }
+        if (response.FinishReason != FinishReason.Stop)
+        {
+            throw new TranslationBatchException(
+                $"Model completion did not complete successfully (FinishReason: {response.FinishReason}).",
+                response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
         }
 
         var expectedOrders = batch.Select(b => b.Order).ToList();
-        var parsed = _promptBuilder.ParseResponse(response.Content, expectedOrders);
+        IReadOnlyDictionary<int, string> parsed;
+        try
+        {
+            parsed = _promptBuilder.ParseResponse(response.Content, expectedOrders);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Contract violation (duplicate or unexpected tag) - carry usage metadata
+            throw new TranslationBatchException(
+                ex.Message,
+                response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
+        }
 
         // Fallback: If only 1 segment was sent and model returned pure untagged text without [SEG: tags
         IReadOnlyDictionary<int, string> finalTranslations = parsed;

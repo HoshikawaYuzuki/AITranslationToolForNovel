@@ -96,10 +96,10 @@ public class TranslationEngineTests
     }
 
     [Fact]
-    public async Task TranslateBatchAsync_SingleSegmentWithWrongTag_DoesNotFallbackToWrongTag()
+    public async Task TranslateBatchAsync_SingleSegmentWithWrongTag_ThrowsBatchExceptionWithUsage()
     {
         // Audit repro F02: AI returned [SEG:99] for a batch containing only segment 0.
-        // It must NOT map [SEG:99] to segment 0!
+        // It must NOT map [SEG:99] to segment 0, and must carry token usage in the exception!
         var fakeProvider = new FakeAiProvider(req => new AiResponse("[SEG:99] unrelated translation", 5, 5, 10, req.Model, FinishReason.Stop));
 
         var batch = new[]
@@ -107,31 +107,50 @@ public class TranslationEngineTests
             new SegmentItem(0, "Source 0")
         };
 
-        var result = await _engine.TranslateBatchAsync(
-            fakeProvider,
-            "test-model",
-            "en",
-            "vi",
-            batch);
+        var ex = await Assert.ThrowsAsync<TranslationBatchException>(() =>
+            _engine.TranslateBatchAsync(fakeProvider, "test-model", "en", "vi", batch));
 
-        Assert.Empty(result.Translations);
-        Assert.False(result.Translations.ContainsKey(0));
+        Assert.Contains("unexpected segment tags", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(10, ex.TotalTokens);
+        Assert.Equal(5, ex.PromptTokens);
+        Assert.Equal(5, ex.CompletionTokens);
     }
 
     [Fact]
-    public async Task TranslateBatchAsync_MaxTokensFinishReason_ThrowsTruncatedError()
+    public async Task TranslateBatchAsync_MaxTokensFinishReason_ThrowsTruncatedErrorWithUsage()
     {
         // Audit repro F03: AI returned FinishReason.MaxTokens
-        var fakeProvider = new FakeAiProvider(req => new AiResponse("[SEG:0] incomplete translation cut mid", 5, 5, 10, req.Model, FinishReason.MaxTokens));
+        var fakeProvider = new FakeAiProvider(req => new AiResponse("[SEG:0] incomplete translation cut mid", 7, 3, 10, req.Model, FinishReason.MaxTokens));
 
         var batch = new[]
         {
             new SegmentItem(0, "Source 0")
         };
 
-        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+        var ex = await Assert.ThrowsAsync<TranslationBatchException>(() =>
             _engine.TranslateBatchAsync(fakeProvider, "test-model", "en", "vi", batch));
 
         Assert.Contains("truncated", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(10, ex.TotalTokens);
+        Assert.Equal(7, ex.PromptTokens);
+        Assert.Equal(3, ex.CompletionTokens);
+    }
+
+    [Fact]
+    public async Task TranslateBatchAsync_ErrorFinishReason_ThrowsErrorWithUsage()
+    {
+        // Audit repro R11: AI returned FinishReason.Error
+        var fakeProvider = new FakeAiProvider(req => new AiResponse("[SEG:0] error output", 8, 2, 10, req.Model, FinishReason.Error));
+
+        var batch = new[]
+        {
+            new SegmentItem(0, "Source 0")
+        };
+
+        var ex = await Assert.ThrowsAsync<TranslationBatchException>(() =>
+            _engine.TranslateBatchAsync(fakeProvider, "test-model", "en", "vi", batch));
+
+        Assert.Contains("FinishReason", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(10, ex.TotalTokens);
     }
 }

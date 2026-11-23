@@ -107,7 +107,7 @@ public sealed class GeminiProvider : IAiProvider
                 var blockReason = blockReasonEl.GetString();
                 if (!string.IsNullOrEmpty(blockReason))
                 {
-                    throw new AiProviderError(AiErrorCode.ContentFiltered, $"Gemini blocked prompt due to: {blockReason}");
+                    throw new AiProviderError(AiErrorCode.ContentFiltered, "Gemini blocked prompt due to content safety policy.");
                 }
             }
 
@@ -123,12 +123,17 @@ public sealed class GeminiProvider : IAiProvider
                 "STOP" => FinishReason.Stop,
                 "MAX_TOKENS" => FinishReason.MaxTokens,
                 "SAFETY" or "RECITATION" or "BLOCKLIST" or "PROHIBITED_CONTENT" or "SPII" => FinishReason.ContentFiltered,
-                _ => FinishReason.Stop
+                _ => FinishReason.Error
             };
 
             if (finishReason == FinishReason.ContentFiltered)
             {
-                throw new AiProviderError(AiErrorCode.ContentFiltered, $"Gemini candidate blocked by content filter: {finishReasonStr}");
+                throw new AiProviderError(AiErrorCode.ContentFiltered, "Gemini candidate blocked by content filter.");
+            }
+
+            if (finishReason == FinishReason.Error)
+            {
+                throw new AiProviderError(AiErrorCode.Unknown, "Gemini candidate did not complete successfully.");
             }
 
             var contentText = string.Empty;
