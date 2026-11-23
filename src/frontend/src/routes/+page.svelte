@@ -9,6 +9,7 @@
     deleteApiKey,
     getNovels,
     createTranslationJob,
+    setJobApiKey,
     getTranslationJobs,
     getTranslationJob,
     cancelTranslationJob,
@@ -55,6 +56,13 @@
   let translationModel = $state('mock-v1');
   let translationLoading = $state(false);
   let translationError = $state<string | null>(null);
+  let jobApiKeyInput = $state('');
+
+  // Per-job API key re-entry (for WaitingForApiKey)
+  let resumeJobApiKeyInput = $state('');
+  let resumeJobApiKeyLoading = $state(false);
+  let resumeJobApiKeyError = $state<string | null>(null);
+  let resumeJobApiKeyMessage = $state<string | null>(null);
 
   let jobs = $state<TranslationJobSummary[]>([]);
   let activeJobDetail = $state<TranslationJobDetail | null>(null);
@@ -261,8 +269,10 @@
         selectedNovelId,
         targetLanguage.trim(),
         translationProvider,
-        translationModel.trim()
+        translationModel.trim(),
+        jobApiKeyInput.trim() || undefined
       );
+      jobApiKeyInput = '';
       await fetchTranslationJobs();
       await selectJob(job.id);
     } catch (e) {
@@ -332,6 +342,27 @@
       await fetchTranslationJobs();
     } catch (e) {
       translationError = e instanceof Error ? e.message : 'Failed to cancel job.';
+    }
+  }
+
+  async function handleResumeJobWithKey(id: string) {
+    if (!resumeJobApiKeyInput.trim()) {
+      resumeJobApiKeyError = 'Please enter an API key.';
+      return;
+    }
+    resumeJobApiKeyLoading = true;
+    resumeJobApiKeyError = null;
+    resumeJobApiKeyMessage = null;
+    try {
+      await setJobApiKey(id, resumeJobApiKeyInput.trim());
+      resumeJobApiKeyMessage = 'API key saved for this job. Job resumed.';
+      resumeJobApiKeyInput = '';
+      await refreshActiveJob();
+      await fetchTranslationJobs();
+    } catch (e) {
+      resumeJobApiKeyError = e instanceof Error ? e.message : 'Failed to provide API key for job.';
+    } finally {
+      resumeJobApiKeyLoading = false;
     }
   }
 
@@ -748,6 +779,23 @@
             </div>
           </div>
 
+          <div>
+            <label for="jobApiKey" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Job-Specific API Key <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">(Optional — isolated to this job in RAM, purged upon completion)</span>
+            </label>
+            <input
+              id="jobApiKey"
+              type="password"
+              placeholder={translationProvider === 'mock' ? 'Not needed for Mock provider' : `Enter ${translationProvider.toUpperCase()} API key for this job only...`}
+              bind:value={jobApiKeyInput}
+              disabled={translationProvider === 'mock'}
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none font-mono disabled:opacity-50"
+            />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              If omitted, your account BYOK key for {translationProvider.toUpperCase()} in RAM (if configured above) will be used as a fallback.
+            </p>
+          </div>
+
           {#if translationError}
             <div class="p-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg text-sm text-red-700 dark:text-red-400">
               {translationError}
@@ -827,12 +875,44 @@
         </div>
 
         {#if activeJobDetail.status === 'WaitingForApiKey'}
-          <div class="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-xl text-amber-800 dark:text-amber-300 text-sm">
-            <div class="font-semibold mb-1">State Machine: Waiting for API Key in RAM</div>
+          <div class="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-xl text-amber-800 dark:text-amber-300 text-sm space-y-3">
+            <div class="font-semibold flex items-center gap-2">
+              <span class="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+              State Machine: Waiting for API Key in RAM
+            </div>
             <p>
               This job is paused because no API key was found in RAM for provider <strong>{activeJobDetail.provider.toUpperCase()}</strong>.
-              Add your key in the BYOK section above to automatically resume translation.
+              You can provide an API key specifically for this job below, or configure an account key in the BYOK section above.
             </p>
+            <div class="pt-2 border-t border-amber-200 dark:border-amber-800/50">
+              <label for="resumeJobApiKey" class="block text-xs font-medium text-amber-900 dark:text-amber-200 mb-1">
+                Provide API Key for this Job (Stored in RAM for this job only):
+              </label>
+              <div class="flex flex-col sm:flex-row gap-2">
+                <input
+                  id="resumeJobApiKey"
+                  type="password"
+                  placeholder="Enter API key to resume this job..."
+                  bind:value={resumeJobApiKeyInput}
+                  disabled={resumeJobApiKeyLoading}
+                  class="flex-1 px-3 py-1.5 border border-amber-300 dark:border-amber-700 rounded-lg bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-amber-500 focus:outline-none font-mono"
+                />
+                <button
+                  type="button"
+                  disabled={resumeJobApiKeyLoading || !resumeJobApiKeyInput.trim()}
+                  onclick={() => handleResumeJobWithKey(activeJobDetail!.id)}
+                  class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-50"
+                >
+                  {resumeJobApiKeyLoading ? 'Resuming...' : 'Provide Key & Resume'}
+                </button>
+              </div>
+              {#if resumeJobApiKeyError}
+                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium">{resumeJobApiKeyError}</p>
+              {/if}
+              {#if resumeJobApiKeyMessage}
+                <p class="mt-1.5 text-xs text-green-600 dark:text-green-400 font-medium">{resumeJobApiKeyMessage}</p>
+              {/if}
+            </div>
           </div>
         {/if}
 

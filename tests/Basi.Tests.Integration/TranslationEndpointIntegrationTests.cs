@@ -2,9 +2,12 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Basi.Api.Data;
+using Basi.Api.Workers;
+using Basi.Core.Interfaces;
 using Basi.Core.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace Basi.Tests.Integration;
@@ -948,6 +951,164 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
             Assert.Equal("requested-model-v1", root.GetProperty("model").GetString());
             // Request count is tracked
             Assert.True(root.GetProperty("requestCount").GetInt32() >= 1);
+        }
+    }
+
+    [Fact]
+    public async Task ClaimCleanup_WhenDatabaseThrowsInFinally_ReleasesClaimAndAllowsSubsequentProcessing()
+    {
+        var (novelId, _, googleId, email) = await SeedNovelAsync(segmentCount: 1);
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var hookTriggered = false;
+        Guid targetJobId = Guid.Empty;
+
+        TranslationQueueWorker.OnBeforeFinallyStatusQueryForTesting = (id) =>
+        {
+            if (id == targetJobId)
+            {
+                hookTriggered = true;
+                throw new InvalidOperationException("Simulated transient DB failure during finally cleanup");
+            }
+            return Task.CompletedTask;
+        };
+
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/translations")
+            {
+                Content = JsonContent.Create(new
+                {
+                    novelId,
+                    targetLanguage = "vi",
+                    provider = "mock",
+                    model = "mock-v1"
+                })
+            };
+            req.Headers.Add("X-XSRF-TOKEN", token);
+
+            var res = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+
+            var json = await res.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            targetJobId = Guid.Parse(doc.RootElement.GetProperty("id").GetString()!);
+
+            // Poll until worker executes the job and hits the hook in finally
+            var maxAttempts = 30;
+            while (maxAttempts-- > 0 && !hookTriggered)
+            {
+                await Task.Delay(200);
+            }
+
+            Assert.True(hookTriggered, "Hook in finally block should have executed and thrown");
+
+            // F08-R: The in-process claim MUST be released even though finally DB query threw
+            Assert.False(TranslationQueueWorker.HasActiveClaim(targetJobId), "Claim must be removed from RAM even when finally DB query throws");
+        }
+        finally
+        {
+            TranslationQueueWorker.OnBeforeFinallyStatusQueryForTesting = null;
+            TranslationQueueWorker.ClearActiveClaims();
+        }
+    }
+
+    [Fact]
+    public async Task TokenBudget_SoftStop_HaltsFurtherBatchesAndPreservesCompletedSegments()
+    {
+        var (novelId, ownerId, _, _) = await SeedNovelAsync(segmentCount: 5);
+
+        Guid jobId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job = new TranslationJob
+            {
+                NovelId = novelId,
+                OwnerId = ownerId,
+                Provider = "mock",
+                Model = "mock-v1",
+                TargetLanguage = "vi",
+                Status = JobStatus.Queued,
+                TotalSegments = 5,
+                CompletedSegments = 2,
+                TotalTokens = 100_000, // Reached MaxJobTotalTokens
+                PromptTokens = 50_000,
+                CompletionTokens = 50_000,
+                CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+                UpdatedAt = DateTime.UtcNow
+            };
+            db.TranslationJobs.Add(job);
+
+            var segments = await db.Segments.Where(s => s.NovelId == novelId).OrderBy(s => s.Order).ToListAsync();
+            // 2 completed segments
+            db.TranslatedSegments.Add(new TranslatedSegment
+            {
+                JobId = job.Id,
+                SegmentId = segments[0].Id,
+                Order = 0,
+                SourceText = segments[0].Content,
+                TranslatedText = "Bản dịch 0",
+                Status = SegmentStatus.Completed
+            });
+            db.TranslatedSegments.Add(new TranslatedSegment
+            {
+                JobId = job.Id,
+                SegmentId = segments[1].Id,
+                Order = 1,
+                SourceText = segments[1].Content,
+                TranslatedText = "Bản dịch 1",
+                Status = SegmentStatus.Completed
+            });
+            // 3 pending segments
+            for (var i = 2; i < 5; i++)
+            {
+                db.TranslatedSegments.Add(new TranslatedSegment
+                {
+                    JobId = job.Id,
+                    SegmentId = segments[i].Id,
+                    Order = i,
+                    SourceText = segments[i].Content,
+                    Status = SegmentStatus.Pending
+                });
+            }
+
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        // Poll until background worker picks up and processes the job
+        var maxAttempts = 30;
+        JobStatus finalStatus = JobStatus.Queued;
+        string? finalError = null;
+
+        while (maxAttempts-- > 0 && finalStatus != JobStatus.Failed && finalStatus != JobStatus.Completed)
+        {
+            await Task.Delay(200);
+            using var scope = _factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var j = await db.TranslationJobs.FindAsync(jobId);
+            if (j != null)
+            {
+                finalStatus = j.Status;
+                finalError = j.ErrorMessage;
+            }
+        }
+
+        Assert.Equal(JobStatus.Failed, finalStatus);
+        Assert.NotNull(finalError);
+        Assert.Contains("budget", finalError, StringComparison.OrdinalIgnoreCase);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            // Completed segments from prior checkpoint must be preserved
+            var completedCount = await db.TranslatedSegments.CountAsync(s => s.JobId == jobId && s.Status == SegmentStatus.Completed);
+            Assert.Equal(2, completedCount);
         }
     }
 }

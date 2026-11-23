@@ -17,6 +17,11 @@ public sealed class TranslationQueueWorker : BackgroundService
     private readonly Basi.Core.Interfaces.IJobCancellationRegistry _cancellationRegistry;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _activeJobClaims = new();
 
+    internal static bool HasActiveClaim(Guid jobId) => _activeJobClaims.ContainsKey(jobId);
+    internal static void ClearActiveClaims() => _activeJobClaims.Clear();
+    internal static int ActiveClaimCount => _activeJobClaims.Count;
+    internal static Func<Guid, Task>? OnBeforeFinallyStatusQueryForTesting { get; set; }
+
     private const int MaxBatchSize = 5;
     private const int MaxBatchChars = 3000;
     private const int MaxSingleSegmentChars = 12000;
@@ -63,7 +68,7 @@ public sealed class TranslationQueueWorker : BackgroundService
         _logger.LogInformation("TranslationQueueWorker stopped.");
     }
 
-    private async Task<bool> ProcessNextJobAsync(CancellationToken ct)
+    internal async Task<bool> ProcessNextJobAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
@@ -186,10 +191,13 @@ public sealed class TranslationQueueWorker : BackgroundService
             {
                 if (ct.IsCancellationRequested || jobCts.IsCancellationRequested) break;
 
-                // F07: Job-wide token budget bound
+                // F07: Job-wide token budget bound (soft-stop semantics)
+                // Inter-batch token budget cap: If cumulative token usage has reached or exceeded MaxJobTotalTokens (100,000),
+                // further batches are halted immediately. This prevents runaway API spending while preserving all checkpointed
+                // segments already committed to the database in previous batches.
                 if (job.TotalTokens >= MaxJobTotalTokens)
                 {
-                    _logger.LogWarning("Job {JobId} exceeded total token budget ({Budget}). Halting further batches.", job.Id, MaxJobTotalTokens);
+                    _logger.LogWarning("Job {JobId} reached total token budget ({Budget}). Halting further batches.", job.Id, MaxJobTotalTokens);
                     job.Status = JobStatus.Failed;
                     job.ErrorMessage = $"Job exceeded total token budget of {MaxJobTotalTokens:N0} tokens.";
                     job.UpdatedAt = DateTime.UtcNow;
@@ -428,17 +436,31 @@ public sealed class TranslationQueueWorker : BackgroundService
         }
         finally
         {
-            var finalStatus = await db.TranslationJobs
-                .Where(j => j.Id == candidate.Id)
-                .Select(j => j.Status)
-                .FirstOrDefaultAsync(CancellationToken.None);
-
-            if (finalStatus is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
+            try
             {
-                apiKeyVault.RemoveJobKey(candidate.Id);
-            }
+                if (OnBeforeFinallyStatusQueryForTesting != null)
+                {
+                    await OnBeforeFinallyStatusQueryForTesting(candidate.Id);
+                }
 
-            _activeJobClaims.TryRemove(candidate.Id, out _);
+                var finalStatus = await db.TranslationJobs
+                    .Where(j => j.Id == candidate.Id)
+                    .Select(j => j.Status)
+                    .FirstOrDefaultAsync(CancellationToken.None);
+
+                if (finalStatus is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
+                {
+                    apiKeyVault.RemoveJobKey(candidate.Id);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to query or cleanup final status for job {JobId} in finally block.", candidate.Id);
+            }
+            finally
+            {
+                _activeJobClaims.TryRemove(candidate.Id, out _);
+            }
         }
     }
 
