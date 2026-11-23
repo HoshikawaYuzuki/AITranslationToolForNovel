@@ -226,7 +226,7 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
         Assert.Contains("redirect_uri", location);
         Assert.DoesNotContain(evilUrl, location);
 
-        // Decrypt the state parameter using GoogleOptions.StateDataFormat to verify fallback to "/"
+        // Decrypt the state parameter using GoogleOptions.StateDataFormat to verify fallback to frontend root
         var uri = new Uri(location);
         var query = HttpUtility.ParseQueryString(uri.Query);
         var state = query["state"];
@@ -235,7 +235,7 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
         var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
         var properties = googleOptions.StateDataFormat.Unprotect(state);
         Assert.NotNull(properties);
-        Assert.Equal("/", properties.RedirectUri);
+        Assert.Equal("http://localhost:5173/", properties.RedirectUri);
     }
 
     [Fact]
@@ -286,7 +286,47 @@ public class AuthEndpointIntegrationTests : IClassFixture<AuthTestFactory>
         var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
         var properties = googleOptions.StateDataFormat.Unprotect(state);
         Assert.NotNull(properties);
-        Assert.Equal(validPath, properties.RedirectUri);
+        Assert.Equal("http://localhost:5173" + validPath, properties.RedirectUri);
+    }
+
+    [Fact]
+    public async Task LoginEndpoint_WithValidAbsoluteFrontendUrl_PreservesReturnUrl()
+    {
+        var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+
+        var validUrl = "http://localhost:5173/novels/123";
+        var response = await client.GetAsync($"/api/auth/login?returnUrl={Uri.EscapeDataString(validUrl)}");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        var location = response.Headers.Location?.ToString() ?? string.Empty;
+        Assert.StartsWith("https://accounts.google.com", location);
+
+        var uri = new Uri(location);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+        var state = query["state"];
+        Assert.NotNull(state);
+
+        var googleOptions = _factory.Services.GetRequiredService<IOptionsMonitor<GoogleOptions>>().Get(GoogleDefaults.AuthenticationScheme);
+        var properties = googleOptions.StateDataFormat.Unprotect(state);
+        Assert.NotNull(properties);
+        Assert.Equal(validUrl, properties.RedirectUri);
+    }
+
+    [Fact]
+    public async Task RootEndpoint_RedirectsToFrontendUrl()
+    {
+        var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+
+        var response = await client.GetAsync("/");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal("http://localhost:5173/", response.Headers.Location?.ToString());
     }
 
     // ------------------------------------------------------------------ //

@@ -42,12 +42,14 @@ builder.Services.Configure<FormOptions>(options =>
     options.MultipartBodyLengthLimit = 12 * 1024 * 1024;
 });
 
-// ---------- CORS ----------
+// ---------- CORS & Frontend URL ----------
+var frontendUrl = (builder.Configuration["FrontendUrl"] ?? "http://localhost:5173").TrimEnd('/');
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.WithOrigins("http://localhost:5173")
+        policy.WithOrigins(frontendUrl)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
@@ -159,28 +161,42 @@ app.MapGet("/api/antiforgery/token", (IAntiforgery antiforgery, HttpContext ctx)
     });
 });
 
+// Root endpoint — redirect to frontend UI
+app.MapGet("/", () => Results.Redirect($"{frontendUrl}/"));
+
 // ======================================================================
 // Auth Endpoints
 // ======================================================================
 
 // GET /api/auth/login — redirect to Google OAuth with open redirect protection
-app.MapGet("/api/auth/login", (HttpContext ctx, string? returnUrl) =>
+app.MapGet("/api/auth/login", (HttpContext ctx, IConfiguration config, string? returnUrl) =>
 {
-    // Strictly validate returnUrl to prevent open redirects:
-    // Must start with '/' and must NOT start with '//' or '/\'
-    var safeReturnUrl = "/";
-    if (!string.IsNullOrEmpty(returnUrl)
-        && returnUrl.StartsWith('/')
-        && !returnUrl.StartsWith("//")
-        && !returnUrl.StartsWith("/\\"))
+    var frontendBase = (config["FrontendUrl"] ?? "http://localhost:5173").TrimEnd('/');
+    var fallbackUrl = $"{frontendBase}/";
+
+    string redirectUri = fallbackUrl;
+
+    if (!string.IsNullOrWhiteSpace(returnUrl))
     {
-        safeReturnUrl = returnUrl;
+        // Case 1: Local relative path (e.g. "/novels/my-list", "/")
+        if (returnUrl.StartsWith('/') && !returnUrl.StartsWith("//") && !returnUrl.StartsWith("/\\"))
+        {
+            redirectUri = $"{frontendBase}{returnUrl}";
+        }
+        // Case 2: Absolute URL matching the configured frontend origin
+        else if (Uri.TryCreate(returnUrl, UriKind.Absolute, out var targetUri)
+                 && Uri.TryCreate(frontendBase, UriKind.Absolute, out var baseUri)
+                 && string.Equals(targetUri.GetLeftPart(UriPartial.Authority), baseUri.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+        {
+            redirectUri = targetUri.ToString();
+        }
+        // Otherwise: open redirect attempt (e.g. https://evil.com, //evil.com, /\\evil.com) -> fallbackUrl
     }
 
     return Results.Challenge(
         new AuthenticationProperties
         {
-            RedirectUri = safeReturnUrl
+            RedirectUri = redirectUri
         },
         [GoogleDefaults.AuthenticationScheme]);
 });
