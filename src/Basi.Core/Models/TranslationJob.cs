@@ -28,6 +28,15 @@ public sealed class TranslationJob
     /// <summary>Successfully completed segments count.</summary>
     public int CompletedSegments { get; set; }
 
+    /// <summary>Total prompt / input tokens consumed by the job.</summary>
+    public int PromptTokens { get; set; }
+
+    /// <summary>Total completion / output tokens consumed by the job.</summary>
+    public int CompletionTokens { get; set; }
+
+    /// <summary>Total tokens consumed across all batches in this job.</summary>
+    public int TotalTokens { get; set; }
+
     /// <summary>Error details if the job failed.</summary>
     public string? ErrorMessage { get; set; }
 

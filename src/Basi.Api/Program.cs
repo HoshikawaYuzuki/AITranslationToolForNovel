@@ -228,7 +228,11 @@ app.MapGet("/api/auth/me", async (HttpContext ctx, UserManager<ApplicationUser> 
 }).RequireAuthorization();
 
 // POST /api/auth/logout — signs out and clears session cookie (requires antiforgery validation)
-app.MapPost("/api/auth/logout", async (HttpContext ctx, IAntiforgery antiforgery) =>
+app.MapPost("/api/auth/logout", async (
+    HttpContext ctx,
+    IAntiforgery antiforgery,
+    UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault) =>
 {
     try
     {
@@ -237,6 +241,16 @@ app.MapPost("/api/auth/logout", async (HttpContext ctx, IAntiforgery antiforgery
     catch (AntiforgeryValidationException)
     {
         return Results.BadRequest(new { error = "Invalid antiforgery token." });
+    }
+
+    var googleId = ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (googleId != null)
+    {
+        var user = await userManager.FindByLoginAsync("Google", googleId);
+        if (user != null)
+        {
+            keyVault.ClearAll(user.Id);
+        }
     }
 
     await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
@@ -580,6 +594,9 @@ app.MapGet("/api/novels/{id:guid}/translations", async (
             status = j.Status.ToString(),
             totalSegments = j.TotalSegments,
             completedSegments = j.CompletedSegments,
+            promptTokens = j.PromptTokens,
+            completionTokens = j.CompletionTokens,
+            totalTokens = j.TotalTokens,
             errorMessage = j.ErrorMessage,
             createdAt = j.CreatedAt,
             updatedAt = j.UpdatedAt
@@ -640,6 +657,9 @@ app.MapPost("/api/translations", async (
     var model = string.IsNullOrWhiteSpace(req.Model)
         ? (normProvider == "gemini" ? "gemini-2.5-flash" : normProvider == "openai" ? "gpt-4o-mini" : "mock-v1")
         : req.Model.Trim();
+
+    if (model.Length > 128 || !Regex.IsMatch(model, @"^[a-zA-Z0-9_\-\.\/:]+$"))
+        return Results.BadRequest(new { error = "Model name must not exceed 128 characters and contain only alphanumeric characters and delimiters (-, _, ., /, :)." });
 
     var novel = await db.Novels
         .Include(n => n.Segments)
@@ -732,6 +752,9 @@ app.MapGet("/api/translations", async (
             status = j.Status.ToString(),
             totalSegments = j.TotalSegments,
             completedSegments = j.CompletedSegments,
+            promptTokens = j.PromptTokens,
+            completionTokens = j.CompletionTokens,
+            totalTokens = j.TotalTokens,
             errorMessage = j.ErrorMessage,
             createdAt = j.CreatedAt,
             updatedAt = j.UpdatedAt
@@ -775,6 +798,9 @@ app.MapGet("/api/translations/{id:guid}", async (
         status = job.Status.ToString(),
         totalSegments = job.TotalSegments,
         completedSegments = job.CompletedSegments,
+        promptTokens = job.PromptTokens,
+        completionTokens = job.CompletionTokens,
+        totalTokens = job.TotalTokens,
         errorMessage = job.ErrorMessage,
         createdAt = job.CreatedAt,
         updatedAt = job.UpdatedAt,

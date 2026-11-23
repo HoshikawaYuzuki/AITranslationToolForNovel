@@ -128,4 +128,26 @@ public class OpenAiProviderTests
 
         Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
     }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task CompleteAsync_UpstreamErrorContainingCanary_DoesNotLeakCanaryInException(HttpStatusCode statusCode)
+    {
+        const string canarySecret = "CANARY_SECRET_OPENAI_67890_NO_LEAK";
+        var handler = new MockHttpHandler(_ => new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent($"{{\"error\": {{\"message\": \"Error with secret: {canarySecret}\"}}}}", Encoding.UTF8, "application/json")
+        });
+
+        var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, "sk-test-openai");
+
+        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+            provider.CompleteAsync(new AiRequest("gpt-4o-mini", "system", "prompt")));
+
+        Assert.DoesNotContain(canarySecret, ex.Message);
+    }
 }

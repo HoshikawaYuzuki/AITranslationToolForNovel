@@ -63,6 +63,9 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
             b.Property(j => j.Provider).HasMaxLength(64).IsRequired();
             b.Property(j => j.Model).HasMaxLength(128).IsRequired();
             b.Property(j => j.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(j => j.PromptTokens).HasDefaultValue(0);
+            b.Property(j => j.CompletionTokens).HasDefaultValue(0);
+            b.Property(j => j.TotalTokens).HasDefaultValue(0);
             b.Property(j => j.CreatedAt).HasDefaultValueSql("now()");
             b.Property(j => j.UpdatedAt).HasDefaultValueSql("now()");
             b.HasIndex(j => j.OwnerId);

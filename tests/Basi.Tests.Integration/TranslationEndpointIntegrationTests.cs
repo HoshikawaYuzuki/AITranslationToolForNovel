@@ -195,6 +195,7 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
 
         Assert.Equal("Completed", status);
         Assert.Equal(3, jobElement.GetProperty("completedSegments").GetInt32());
+        Assert.True(jobElement.TryGetProperty("totalTokens", out _));
 
         var segments = jobElement.GetProperty("segments");
         Assert.Equal(3, segments.GetArrayLength());
@@ -309,5 +310,67 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
         cancelReq.Headers.Add("X-XSRF-TOKEN", tokenB);
         var cancelRes = await clientB.SendAsync(cancelReq);
         Assert.Equal(HttpStatusCode.NotFound, cancelRes.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateTranslation_ModelExceeds128Chars_Returns400()
+    {
+        var (novelId, _, googleId, email) = await SeedNovelAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var longModel = new string('m', 129);
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/translations")
+        {
+            Content = JsonContent.Create(new
+            {
+                novelId,
+                targetLanguage = "vi",
+                provider = "mock",
+                model = longModel
+            })
+        };
+        req.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_ClearsApiKeyVaultForUser()
+    {
+        var googleId = $"google-logout-{Guid.NewGuid():N}";
+        var email = $"logout-{Guid.NewGuid():N}@example.com";
+        var user = await _factory.SeedUserAsync(googleId, email, "Logout User");
+
+        // Set key in vault
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var vault = scope.ServiceProvider.GetRequiredService<Basi.Module.Translation.Services.IApiKeyVault>();
+            vault.SetKey(user.Id, "gemini", "secret-test-key-12345");
+            Assert.True(vault.HasKey(user.Id, "gemini"));
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var logoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
+        logoutReq.Headers.Add("X-XSRF-TOKEN", token);
+
+        var logoutRes = await client.SendAsync(logoutReq);
+        Assert.Equal(HttpStatusCode.OK, logoutRes.StatusCode);
+
+        // Verify key was purged from RAM vault
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var vault = scope.ServiceProvider.GetRequiredService<Basi.Module.Translation.Services.IApiKeyVault>();
+            Assert.False(vault.HasKey(user.Id, "gemini"));
+        }
     }
 }

@@ -141,6 +141,11 @@ namespace Basi.Api.Migrations
                     b.Property<int>("CompletedSegments")
                         .HasColumnType("integer");
 
+                    b.Property<int>("CompletionTokens")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -160,6 +165,11 @@ namespace Basi.Api.Migrations
                     b.Property<Guid>("OwnerId")
                         .HasColumnType("uuid");
 
+                    b.Property<int>("PromptTokens")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<string>("Provider")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -177,6 +187,11 @@ namespace Basi.Api.Migrations
 
                     b.Property<int>("TotalSegments")
                         .HasColumnType("integer");
+
+                    b.Property<int>("TotalTokens")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<DateTime>("UpdatedAt")
                         .ValueGeneratedOnAdd()

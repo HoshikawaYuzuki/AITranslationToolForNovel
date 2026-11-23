@@ -272,6 +272,8 @@
     }
   }
 
+  let isRefreshingJob = false;
+
   async function selectJob(id: string) {
     activeJobId = id;
     await refreshActiveJob();
@@ -279,19 +281,26 @@
   }
 
   async function refreshActiveJob() {
-    if (!activeJobId) return;
+    if (!activeJobId || isRefreshingJob) return;
+    isRefreshingJob = true;
+    const targetId = activeJobId;
     try {
-      activeJobDetail = await getTranslationJob(activeJobId);
-      // Update in jobs list
-      const idx = jobs.findIndex(j => j.id === activeJobId);
-      if (idx !== -1 && activeJobDetail) {
-        jobs[idx] = { ...activeJobDetail };
-      }
-      if (activeJobDetail.status === 'Completed' || activeJobDetail.status === 'Failed' || activeJobDetail.status === 'Cancelled') {
-        stopPolling();
+      const detail = await getTranslationJob(targetId);
+      // F09: Guard against race conditions and out-of-order responses when switching jobs
+      if (activeJobId === targetId && detail) {
+        activeJobDetail = detail;
+        const idx = jobs.findIndex(j => j.id === targetId);
+        if (idx !== -1) {
+          jobs[idx] = { ...detail };
+        }
+        if (detail.status === 'Completed' || detail.status === 'Failed' || detail.status === 'Cancelled') {
+          stopPolling();
+        }
       }
     } catch (e) {
       console.error('Failed to refresh job', e);
+    } finally {
+      isRefreshingJob = false;
     }
   }
 
@@ -819,6 +828,12 @@
               style="width: {(activeJobDetail.completedSegments / Math.max(1, activeJobDetail.totalSegments)) * 100}%"
             ></div>
           </div>
+          {#if activeJobDetail.totalTokens !== undefined && activeJobDetail.totalTokens > 0}
+            <div class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 flex gap-4">
+              <span>Token Usage: <strong>{activeJobDetail.totalTokens.toLocaleString()}</strong> tokens</span>
+              <span>(Prompt: {activeJobDetail.promptTokens?.toLocaleString() ?? 0}, Completion: {activeJobDetail.completionTokens?.toLocaleString() ?? 0})</span>
+            </div>
+          {/if}
         </div>
 
         <!-- Bilingual Reader Grid -->

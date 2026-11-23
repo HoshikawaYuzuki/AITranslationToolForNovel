@@ -51,7 +51,9 @@ public class GeminiProviderTests
         var handler = new MockHttpHandler(req =>
         {
             Assert.Contains("gemini-2.5-flash", req.RequestUri!.ToString());
-            Assert.Contains("key=test-api-key", req.RequestUri.ToString());
+            Assert.DoesNotContain("key=", req.RequestUri.ToString());
+            Assert.True(req.Headers.Contains("x-goog-api-key"));
+            Assert.Equal("test-api-key", req.Headers.GetValues("x-goog-api-key").First());
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
@@ -130,5 +132,27 @@ public class GeminiProviderTests
             provider.CompleteAsync(new AiRequest("gemini-2.5-flash", "system", "harmful text")));
 
         Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task CompleteAsync_UpstreamErrorContainingCanary_DoesNotLeakCanaryInException(HttpStatusCode statusCode)
+    {
+        const string canarySecret = "CANARY_SECRET_12345_DO_NOT_LEAK";
+        var handler = new MockHttpHandler(_ => new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent($"{{\"error\": {{\"message\": \"Error with secret: {canarySecret}\"}}}}", Encoding.UTF8, "application/json")
+        });
+
+        var client = new HttpClient(handler);
+        var provider = new GeminiProvider(client, "test-api-key");
+
+        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+            provider.CompleteAsync(new AiRequest("gemini-2.5-flash", "system", "prompt")));
+
+        Assert.DoesNotContain(canarySecret, ex.Message);
     }
 }

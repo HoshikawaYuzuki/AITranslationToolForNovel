@@ -27,7 +27,7 @@ public sealed class GeminiProvider : IAiProvider
         ct.ThrowIfCancellationRequested();
 
         var model = !string.IsNullOrWhiteSpace(request.Model) ? request.Model.Trim() : "gemini-2.5-flash";
-        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={Uri.EscapeDataString(_apiKey)}";
+        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent";
 
         var payload = new JsonObject
         {
@@ -60,24 +60,30 @@ public sealed class GeminiProvider : IAiProvider
             };
         }
 
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(payload)
+        };
+        httpRequest.Headers.TryAddWithoutValidation("x-goog-api-key", _apiKey);
+
         HttpResponseMessage httpResponse;
         try
         {
-            httpResponse = await _httpClient.PostAsJsonAsync(endpoint, payload, ct);
+            httpResponse = await _httpClient.SendAsync(httpRequest, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
-            throw new AiProviderError(AiErrorCode.NetworkError, $"Network error connecting to Gemini API: {ex.Message}");
+            throw new AiProviderError(AiErrorCode.NetworkError, "Network error connecting to Gemini API.");
         }
 
         if (!httpResponse.IsSuccessStatusCode)
         {
             var errorBody = await httpResponse.Content.ReadAsStringAsync(ct);
-            throw MapHttpError(httpResponse.StatusCode, errorBody);
+            throw MapHttpError(httpResponse.StatusCode, errorBody, model);
         }
 
         JsonDocument doc;
@@ -85,9 +91,9 @@ public sealed class GeminiProvider : IAiProvider
         {
             doc = await JsonDocument.ParseAsync(await httpResponse.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            throw new AiProviderError(AiErrorCode.Unknown, $"Failed to parse Gemini response JSON: {ex.Message}");
+            throw new AiProviderError(AiErrorCode.Unknown, "Failed to parse Gemini response JSON.");
         }
 
         using (doc)
@@ -164,17 +170,20 @@ public sealed class GeminiProvider : IAiProvider
         }
     }
 
-    private static AiProviderError MapHttpError(HttpStatusCode status, string errorBody)
+    private static AiProviderError MapHttpError(HttpStatusCode status, string errorBody, string model)
     {
         return status switch
         {
-            HttpStatusCode.TooManyRequests => new AiProviderError(AiErrorCode.RateLimited, $"Gemini rate limit exceeded: {errorBody}"),
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new AiProviderError(AiErrorCode.InvalidApiKey, $"Gemini API key is invalid or lacks permission: {errorBody}"),
-            HttpStatusCode.NotFound => new AiProviderError(AiErrorCode.ModelNotFound, $"Gemini model not found: {errorBody}"),
+            HttpStatusCode.TooManyRequests => new AiProviderError(AiErrorCode.RateLimited, "Gemini rate limit exceeded. Please retry later."),
+            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new AiProviderError(AiErrorCode.InvalidApiKey, "Gemini API key is invalid or lacks permission."),
+            HttpStatusCode.NotFound => new AiProviderError(AiErrorCode.ModelNotFound, $"Gemini model '{model}' not found."),
             HttpStatusCode.BadRequest when errorBody.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase)
                                        || errorBody.Contains("API key not valid", StringComparison.OrdinalIgnoreCase)
-                => new AiProviderError(AiErrorCode.InvalidApiKey, $"Gemini API key is invalid: {errorBody}"),
-            _ => new AiProviderError(AiErrorCode.Unknown, $"Gemini API error (HTTP {(int)status}): {errorBody}")
+                => new AiProviderError(AiErrorCode.InvalidApiKey, "Gemini API key is invalid."),
+            HttpStatusCode.BadRequest when errorBody.Contains("SAFETY", StringComparison.OrdinalIgnoreCase)
+                                       || errorBody.Contains("HARM_CATEGORY", StringComparison.OrdinalIgnoreCase)
+                => new AiProviderError(AiErrorCode.ContentFiltered, "Gemini blocked the prompt due to safety policy."),
+            _ => new AiProviderError(AiErrorCode.Unknown, $"Gemini API request failed with HTTP {(int)status}.")
         };
     }
 }

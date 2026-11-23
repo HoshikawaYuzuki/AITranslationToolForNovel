@@ -97,4 +97,29 @@ public class TranslationPromptBuilderTests
         Assert.Equal("Chỉ dịch được câu 0", parsed[0]);
         Assert.False(parsed.ContainsKey(1));
     }
+
+    [Fact]
+    public void ParseResponse_DuplicateTag_ThrowsInvalidOperationException()
+    {
+        // Audit repro case: duplicate tag [SEG:0]
+        var response = "[SEG:0] first [SEG:0] second [SEG:99] unknown";
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _builder.ParseResponse(response, new[] { 0 }));
+
+        Assert.Contains("duplicate segment tags", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("0", ex.Message);
+    }
+
+    [Fact]
+    public void ParseResponse_UnexpectedTag_IsIgnoredAndNotMapped()
+    {
+        // Segment 99 should not be accepted when batch expected only 0 and 1
+        var response = "[SEG:0] Câu 0 [SEG:99] Bất ngờ [SEG:1] Câu 1";
+        var parsed = _builder.ParseResponse(response, new[] { 0, 1 });
+
+        Assert.Equal(2, parsed.Count);
+        Assert.True(parsed.ContainsKey(0));
+        Assert.True(parsed.ContainsKey(1));
+        Assert.False(parsed.ContainsKey(99));
+    }
 }

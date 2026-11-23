@@ -68,10 +68,15 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
 
     public IReadOnlyDictionary<int, string> ParseResponse(string content, IEnumerable<int> expectedOrders)
     {
+        ArgumentNullException.ThrowIfNull(expectedOrders);
+
         var result = new Dictionary<int, string>();
         if (string.IsNullOrWhiteSpace(content)) return result;
 
-        // Matches [SEG:123] and captures the order number and following text up to next [SEG: or end
+        var expectedSet = expectedOrders.ToHashSet();
+        var seenOrders = new HashSet<int>();
+        var duplicateOrders = new List<int>();
+
         var pattern = SegmentTagRegex();
         var matches = pattern.Matches(content);
 
@@ -79,9 +84,29 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         {
             if (int.TryParse(match.Groups[1].Value, out var order))
             {
+                if (!seenOrders.Add(order))
+                {
+                    duplicateOrders.Add(order);
+                    continue;
+                }
+
+                if (!expectedSet.Contains(order))
+                {
+                    continue;
+                }
+
                 var text = match.Groups[2].Value.Trim();
-                result[order] = text;
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    result[order] = text;
+                }
             }
+        }
+
+        if (duplicateOrders.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Model response contained duplicate segment tags: {string.Join(", ", duplicateOrders.Distinct())}");
         }
 
         return result;

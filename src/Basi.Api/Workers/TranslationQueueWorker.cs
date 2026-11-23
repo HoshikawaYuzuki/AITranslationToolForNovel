@@ -14,7 +14,8 @@ public sealed class TranslationQueueWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TranslationQueueWorker> _logger;
-    private const int BatchSize = 5;
+    private const int MaxBatchSize = 5;
+    private const int MaxBatchChars = 3000;
 
     public TranslationQueueWorker(
         IServiceScopeFactory scopeFactory,
@@ -59,6 +60,7 @@ public sealed class TranslationQueueWorker : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
         var providerFactory = scope.ServiceProvider.GetRequiredService<IAiProviderFactory>();
         var translationEngine = scope.ServiceProvider.GetRequiredService<ITranslationEngine>();
+        var apiKeyVault = scope.ServiceProvider.GetRequiredService<IApiKeyVault>();
 
         // Pick oldest Queued or interrupted Processing job
         var job = await db.TranslationJobs
@@ -71,20 +73,18 @@ public sealed class TranslationQueueWorker : BackgroundService
 
         _logger.LogInformation("Processing translation job {JobId} for novel '{NovelTitle}'", job.Id, job.Novel?.Title);
 
-        // 1. Resolve AI Provider and check RAM key
-        Basi.Core.Interfaces.IAiProvider provider;
-        try
+        // 1. Initial key existence check for non-mock providers
+        if (!string.Equals(job.Provider, "mock", StringComparison.OrdinalIgnoreCase))
         {
-            provider = providerFactory.GetProviderForUser(job.OwnerId, job.Provider);
-        }
-        catch (AiProviderError ex) when (ex.ErrorCode == AiErrorCode.InvalidApiKey)
-        {
-            _logger.LogWarning("Job {JobId} paused: API key missing for provider {Provider}.", job.Id, job.Provider);
-            job.Status = JobStatus.WaitingForApiKey;
-            job.ErrorMessage = ex.Message;
-            job.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(ct);
-            return true;
+            if (!apiKeyVault.HasKey(job.OwnerId, job.Provider))
+            {
+                _logger.LogWarning("Job {JobId} paused: API key missing for provider {Provider}.", job.Id, job.Provider);
+                job.Status = JobStatus.WaitingForApiKey;
+                job.ErrorMessage = "API key is missing or invalid. Please provide your API key to resume.";
+                job.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
+                return true;
+            }
         }
 
         // 2. Transition to Processing
@@ -119,12 +119,13 @@ public sealed class TranslationQueueWorker : BackgroundService
 
         var sourceLanguage = job.Novel?.SourceLanguage ?? "ja";
 
-        // 4. Process segments in batches
-        for (var i = 0; i < pendingSegments.Count; i += BatchSize)
+        // 4. Process segments in bounded batches (by size and char count)
+        var segmentIndex = 0;
+        while (segmentIndex < pendingSegments.Count)
         {
             if (ct.IsCancellationRequested) break;
 
-            // Check if job was cancelled concurrently by user
+            // In-flight check if job was cancelled concurrently by user
             var currentStatus = await db.TranslationJobs
                 .Where(j => j.Id == job.Id)
                 .Select(j => j.Status)
@@ -136,7 +137,36 @@ public sealed class TranslationQueueWorker : BackgroundService
                 return true;
             }
 
-            var batch = pendingSegments.Skip(i).Take(BatchSize).ToList();
+            // Construct bounded batch (bounded by MaxBatchSize and MaxBatchChars)
+            var batch = new List<TranslatedSegment>();
+            var accumulatedChars = 0;
+            while (segmentIndex < pendingSegments.Count && batch.Count < MaxBatchSize)
+            {
+                var candidate = pendingSegments[segmentIndex];
+                var candidateChars = candidate.SourceText.Length;
+                if (batch.Count > 0 && accumulatedChars + candidateChars > MaxBatchChars)
+                {
+                    break;
+                }
+                batch.Add(candidate);
+                accumulatedChars += candidateChars;
+                segmentIndex++;
+            }
+
+            // Verify API key is still valid and present in RAM vault before executing batch (F04)
+            if (!string.Equals(job.Provider, "mock", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!apiKeyVault.HasKey(job.OwnerId, job.Provider))
+                {
+                    _logger.LogWarning("Job {JobId} paused during processing: API key was revoked or cleared from RAM.", job.Id);
+                    foreach (var seg in batch) seg.Status = SegmentStatus.Pending;
+                    job.Status = JobStatus.WaitingForApiKey;
+                    job.ErrorMessage = "API key was removed or cleared from memory. Please provide your key to resume.";
+                    job.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(ct);
+                    return true;
+                }
+            }
 
             // Mark batch as Translating
             foreach (var seg in batch)
@@ -159,7 +189,9 @@ public sealed class TranslationQueueWorker : BackgroundService
 
             try
             {
-                var translations = await translationEngine.TranslateBatchAsync(
+                var provider = providerFactory.GetProviderForUser(job.OwnerId, job.Provider);
+
+                var batchResult = await translationEngine.TranslateBatchAsync(
                     provider,
                     job.Model,
                     sourceLanguage,
@@ -168,9 +200,14 @@ public sealed class TranslationQueueWorker : BackgroundService
                     contextHistory,
                     ct);
 
+                // F05: Accumulate usage tokens
+                job.PromptTokens += batchResult.PromptTokens;
+                job.CompletionTokens += batchResult.CompletionTokens;
+                job.TotalTokens += batchResult.TotalTokens;
+
                 foreach (var seg in batch)
                 {
-                    if (translations.TryGetValue(seg.Order, out var translated) && !string.IsNullOrWhiteSpace(translated))
+                    if (batchResult.Translations.TryGetValue(seg.Order, out var translated) && !string.IsNullOrWhiteSpace(translated))
                     {
                         seg.TranslatedText = translated;
                         seg.Status = SegmentStatus.Completed;
@@ -186,11 +223,10 @@ public sealed class TranslationQueueWorker : BackgroundService
             }
             catch (AiProviderError ex) when (ex.ErrorCode == AiErrorCode.InvalidApiKey)
             {
-                // Key was cleared or expired in RAM
                 _logger.LogWarning("Job {JobId} paused during processing: API key missing/invalid.", job.Id);
                 foreach (var seg in batch) seg.Status = SegmentStatus.Pending;
                 job.Status = JobStatus.WaitingForApiKey;
-                job.ErrorMessage = ex.Message;
+                job.ErrorMessage = "API key is missing or invalid. Please provide a valid API key to resume.";
                 job.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
                 return true;
@@ -198,21 +234,21 @@ public sealed class TranslationQueueWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to translate batch starting at order {Order} for job {JobId}.", batch[0].Order, job.Id);
+                var sanitizedError = SanitizeErrorMessage(ex.Message);
                 foreach (var seg in batch)
                 {
                     seg.Status = SegmentStatus.Failed;
-                    seg.ErrorMessage = ex.Message;
+                    seg.ErrorMessage = sanitizedError;
                     seg.UpdatedAt = DateTime.UtcNow;
                 }
             }
 
-            // Update completed count and save progress
+            // F06: Save segment status first, THEN query and update CompletedSegments
+            await db.SaveChangesAsync(ct);
+
             var completedCount = await db.TranslatedSegments
                 .CountAsync(ts => ts.JobId == job.Id && ts.Status == SegmentStatus.Completed, ct);
-            if (completedCount == 0)
-            {
-                completedCount = pendingSegments.Count(s => s.Status == SegmentStatus.Completed);
-            }
+
             job.CompletedSegments = completedCount;
             job.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
@@ -246,5 +282,22 @@ public sealed class TranslationQueueWorker : BackgroundService
         }
 
         return true;
+    }
+
+    private static string SanitizeErrorMessage(string? rawMessage)
+    {
+        if (string.IsNullOrWhiteSpace(rawMessage)) return "An error occurred during translation.";
+        if (rawMessage.Contains("truncated", StringComparison.OrdinalIgnoreCase))
+            return "Output was truncated due to token limit.";
+        if (rawMessage.Contains("content filter", StringComparison.OrdinalIgnoreCase))
+            return "Translation was blocked by safety policy.";
+        if (rawMessage.Contains("duplicate segment", StringComparison.OrdinalIgnoreCase))
+            return "Model returned duplicate segment identifiers.";
+        if (rawMessage.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
+            return "API rate limit exceeded. Please retry later.";
+        if (rawMessage.Contains("API key", StringComparison.OrdinalIgnoreCase))
+            return "API key is invalid or unauthorized.";
+
+        return "Translation batch failed. Please retry.";
     }
 }

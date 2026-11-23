@@ -53,6 +53,9 @@ export interface TranslationJobSummary {
   status: 'Created' | 'Queued' | 'Processing' | 'WaitingForApiKey' | 'Completed' | 'Failed' | 'Cancelled';
   totalSegments: number;
   completedSegments: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
   errorMessage?: string | null;
   createdAt: string;
   updatedAt: string;

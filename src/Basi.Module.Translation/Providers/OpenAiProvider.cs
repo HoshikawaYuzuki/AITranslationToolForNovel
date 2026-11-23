@@ -69,15 +69,15 @@ public sealed class OpenAiProvider : IAiProvider
         {
             throw;
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
-            throw new AiProviderError(AiErrorCode.NetworkError, $"Network error connecting to OpenAI API: {ex.Message}");
+            throw new AiProviderError(AiErrorCode.NetworkError, "Network error connecting to OpenAI API.");
         }
 
         if (!httpResponse.IsSuccessStatusCode)
         {
             var errorBody = await httpResponse.Content.ReadAsStringAsync(ct);
-            throw MapHttpError(httpResponse.StatusCode, errorBody);
+            throw MapHttpError(httpResponse.StatusCode, errorBody, model);
         }
 
         JsonDocument doc;
@@ -85,9 +85,9 @@ public sealed class OpenAiProvider : IAiProvider
         {
             doc = await JsonDocument.ParseAsync(await httpResponse.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            throw new AiProviderError(AiErrorCode.Unknown, $"Failed to parse OpenAI response JSON: {ex.Message}");
+            throw new AiProviderError(AiErrorCode.Unknown, "Failed to parse OpenAI response JSON.");
         }
 
         using (doc)
@@ -143,16 +143,16 @@ public sealed class OpenAiProvider : IAiProvider
         }
     }
 
-    private static AiProviderError MapHttpError(HttpStatusCode status, string errorBody)
+    private static AiProviderError MapHttpError(HttpStatusCode status, string errorBody, string model)
     {
         return status switch
         {
-            HttpStatusCode.TooManyRequests => new AiProviderError(AiErrorCode.RateLimited, $"OpenAI rate limit exceeded: {errorBody}"),
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new AiProviderError(AiErrorCode.InvalidApiKey, $"OpenAI API key is invalid or unauthorized: {errorBody}"),
-            HttpStatusCode.NotFound => new AiProviderError(AiErrorCode.ModelNotFound, $"OpenAI model or endpoint not found: {errorBody}"),
+            HttpStatusCode.TooManyRequests => new AiProviderError(AiErrorCode.RateLimited, "OpenAI rate limit exceeded. Please retry later."),
+            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new AiProviderError(AiErrorCode.InvalidApiKey, "OpenAI API key is invalid or unauthorized."),
+            HttpStatusCode.NotFound => new AiProviderError(AiErrorCode.ModelNotFound, $"OpenAI model '{model}' not found."),
             HttpStatusCode.BadRequest when errorBody.Contains("content_filter", StringComparison.OrdinalIgnoreCase)
-                => new AiProviderError(AiErrorCode.ContentFiltered, $"OpenAI content filter triggered: {errorBody}"),
-            _ => new AiProviderError(AiErrorCode.Unknown, $"OpenAI API error (HTTP {(int)status}): {errorBody}")
+                => new AiProviderError(AiErrorCode.ContentFiltered, "OpenAI content filter triggered."),
+            _ => new AiProviderError(AiErrorCode.Unknown, $"OpenAI API request failed with HTTP {(int)status}.")
         };
     }
 }
