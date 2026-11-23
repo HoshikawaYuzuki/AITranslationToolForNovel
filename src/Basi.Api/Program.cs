@@ -132,6 +132,9 @@ builder.Services.AddStoryMemoryModule();
 // Register TxtParser
 builder.Services.AddSingleton<TxtParser>();
 
+// Register Job Cancellation Registry (F08: in-flight cancellation)
+builder.Services.AddSingleton<Basi.Core.Interfaces.IJobCancellationRegistry, Basi.Api.Services.JobCancellationRegistry>();
+
 // Background Queue Worker (ADR-005)
 builder.Services.AddHostedService<Basi.Api.Workers.TranslationQueueWorker>();
 
@@ -826,6 +829,7 @@ app.MapPost("/api/translations/{id:guid}/cancel", async (
     Guid id,
     BasiDbContext db,
     UserManager<ApplicationUser> userManager,
+    Basi.Core.Interfaces.IJobCancellationRegistry cancellationRegistry,
     IAntiforgery antiforgery,
     CancellationToken ct) =>
 {
@@ -855,6 +859,9 @@ app.MapPost("/api/translations/{id:guid}/cancel", async (
 
     if (job.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
         return Results.BadRequest(new { error = $"Cannot cancel job in '{job.Status}' status." });
+
+    // F08: Cancel in-flight AI provider call immediately via cancellation registry
+    cancellationRegistry.TryCancelJob(id);
 
     job.Status = JobStatus.Cancelled;
     job.UpdatedAt = DateTime.UtcNow;

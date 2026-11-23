@@ -78,6 +78,18 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         var duplicateOrders = new List<int>();
         var unexpectedOrders = new List<int>();
 
+        // M01: Validate all segment tag structures to reject malformed/non-integer tags (e.g. [SEG:abc], [SEG:], [SEG:-1])
+        var allTagsPattern = AllSegmentTagsRegex();
+        foreach (Match tagMatch in allTagsPattern.Matches(content))
+        {
+            var tagVal = tagMatch.Groups[1].Value.Trim();
+            if (!int.TryParse(tagVal, out var parsedOrder) || parsedOrder < 0)
+            {
+                throw new InvalidOperationException(
+                    $"Model response contained malformed segment tag: '{tagMatch.Value}'");
+            }
+        }
+
         var pattern = SegmentTagRegex();
         var matches = pattern.Matches(content);
 
@@ -120,6 +132,9 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         return result;
     }
 
-    [GeneratedRegex(@"\[SEG:(\d+)\]\s*([\s\S]*?)(?=(?:\[SEG:\d+\])|\z)")]
+    [GeneratedRegex(@"\[SEG:([^\]]*)\]")]
+    private static partial Regex AllSegmentTagsRegex();
+
+    [GeneratedRegex(@"\[SEG:(\d+)\]\s*([\s\S]*?)(?=(?:\[SEG:[^\]]*\])|\z)")]
     private static partial Regex SegmentTagRegex();
 }

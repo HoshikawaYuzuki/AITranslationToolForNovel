@@ -262,6 +262,65 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
     }
 
     [Fact]
+    public async Task CancelTranslation_InFlightJob_AbortsViaCancellationRegistry()
+    {
+        var (novelId, _, googleId, email) = await SeedNovelAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        Guid jobId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var user = db.Users.First(u => u.Email == email);
+            var job = new TranslationJob
+            {
+                NovelId = novelId,
+                OwnerId = user.Id,
+                Provider = "mock",
+                Model = "mock-model",
+                TargetLanguage = "vi",
+                Status = JobStatus.Processing,
+                TotalSegments = 2,
+                CompletedSegments = 0,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            db.TranslationJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        // Register in-flight CTS simulating active execution in TranslationQueueWorker
+        var cancellationRegistry = _factory.Services.GetRequiredService<Basi.Core.Interfaces.IJobCancellationRegistry>();
+        using var inFlightCts = new CancellationTokenSource();
+        using var registration = cancellationRegistry.RegisterJob(jobId, inFlightCts);
+
+        Assert.False(inFlightCts.IsCancellationRequested);
+
+        var cancelReq = new HttpRequestMessage(HttpMethod.Post, $"/api/translations/{jobId}/cancel");
+        cancelReq.Headers.Add("X-XSRF-TOKEN", token);
+
+        var cancelRes = await client.SendAsync(cancelReq);
+        Assert.Equal(HttpStatusCode.OK, cancelRes.StatusCode);
+
+        // Verify that in-flight CTS was cancelled immediately!
+        Assert.True(inFlightCts.IsCancellationRequested);
+
+        // Verify status in DB
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job = db.TranslationJobs.Find(jobId);
+            Assert.NotNull(job);
+            Assert.Equal(JobStatus.Cancelled, job.Status);
+        }
+    }
+
+    [Fact]
     public async Task UserIsolation_CannotAccessOtherUserJob()
     {
         var (novelId, ownerId, ownerGoogleId, ownerEmail) = await SeedNovelAsync();

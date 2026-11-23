@@ -183,4 +183,43 @@ public class GeminiProviderTests
         Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
         Assert.DoesNotContain(canarySecret, ex.Message);
     }
+
+    [Fact]
+    public async Task CompleteAsync_SafetyBlockWithUsage_PreservesTokensInAiProviderError()
+    {
+        // Audit repro M02: Upstream returns HTTP 200 with finishReason=SAFETY and usage metadata
+        var responseJson = JsonSerializer.Serialize(new
+        {
+            candidates = new[]
+            {
+                new
+                {
+                    finishReason = "SAFETY"
+                }
+            },
+            usageMetadata = new
+            {
+                promptTokenCount = 10,
+                candidatesTokenCount = 5,
+                totalTokenCount = 15
+            }
+        });
+
+        var handler = new MockHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+        });
+
+        var client = new HttpClient(handler);
+        var provider = new GeminiProvider(client, "test-api-key");
+
+        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+            provider.CompleteAsync(new AiRequest("gemini-2.5-flash", "system", "harmful prompt")));
+
+        Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
+        Assert.Equal(10, ex.PromptTokens);
+        Assert.Equal(5, ex.CompletionTokens);
+        Assert.Equal(15, ex.TotalTokens);
+        Assert.Equal("gemini-2.5-flash", ex.ModelUsed);
+    }
 }

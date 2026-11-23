@@ -121,4 +121,17 @@ public class TranslationPromptBuilderTests
         Assert.Contains("unexpected segment tags", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("99", ex.Message);
     }
+
+    [Theory]
+    [InlineData("[SEG:0] text [SEG:abc] bad", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG:] empty tag", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG:-1] negative tag", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG:999999999999999999999999999999] overflow tag", "malformed segment tag")]
+    public void ParseResponse_MalformedTag_ThrowsInvalidOperationException(string response, string expectedErrorMessage)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _builder.ParseResponse(response, new[] { 0 }));
+
+        Assert.Contains(expectedErrorMessage, ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

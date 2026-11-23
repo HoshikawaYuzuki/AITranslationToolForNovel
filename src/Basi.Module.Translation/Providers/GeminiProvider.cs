@@ -100,6 +100,22 @@ public sealed class GeminiProvider : IAiProvider
         {
             var root = doc.RootElement;
 
+            // Usage metadata parsed first so tokens are preserved even on content filter or error responses
+            int promptTokens = 0;
+            int completionTokens = 0;
+            int totalTokens = 0;
+
+            if (root.TryGetProperty("usageMetadata", out var usage))
+            {
+                if (usage.TryGetProperty("promptTokenCount", out var pt)) promptTokens = pt.GetInt32();
+                if (usage.TryGetProperty("candidatesTokenCount", out var ctEl)) completionTokens = ctEl.GetInt32();
+                if (usage.TryGetProperty("totalTokenCount", out var tt)) totalTokens = tt.GetInt32();
+            }
+            if (totalTokens == 0 && (promptTokens > 0 || completionTokens > 0))
+            {
+                totalTokens = promptTokens + completionTokens;
+            }
+
             // Check promptFeedback for block reason
             if (root.TryGetProperty("promptFeedback", out var promptFeedback)
                 && promptFeedback.TryGetProperty("blockReason", out var blockReasonEl))
@@ -107,13 +123,25 @@ public sealed class GeminiProvider : IAiProvider
                 var blockReason = blockReasonEl.GetString();
                 if (!string.IsNullOrEmpty(blockReason))
                 {
-                    throw new AiProviderError(AiErrorCode.ContentFiltered, "Gemini blocked prompt due to content safety policy.");
+                    throw new AiProviderError(
+                        AiErrorCode.ContentFiltered,
+                        "Gemini blocked prompt due to content safety policy.",
+                        promptTokens: promptTokens,
+                        completionTokens: completionTokens,
+                        totalTokens: totalTokens,
+                        modelUsed: model);
                 }
             }
 
             if (!root.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
             {
-                throw new AiProviderError(AiErrorCode.ContentFiltered, "Gemini returned no candidates in response (possible safety block).");
+                throw new AiProviderError(
+                    AiErrorCode.ContentFiltered,
+                    "Gemini returned no candidates in response (possible safety block).",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             var firstCandidate = candidates[0];
@@ -128,12 +156,24 @@ public sealed class GeminiProvider : IAiProvider
 
             if (finishReason == FinishReason.ContentFiltered)
             {
-                throw new AiProviderError(AiErrorCode.ContentFiltered, "Gemini candidate blocked by content filter.");
+                throw new AiProviderError(
+                    AiErrorCode.ContentFiltered,
+                    "Gemini candidate blocked by content filter.",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             if (finishReason == FinishReason.Error)
             {
-                throw new AiProviderError(AiErrorCode.Unknown, "Gemini candidate did not complete successfully.");
+                throw new AiProviderError(
+                    AiErrorCode.Unknown,
+                    "Gemini candidate did not complete successfully.",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             var contentText = string.Empty;
@@ -152,23 +192,11 @@ public sealed class GeminiProvider : IAiProvider
                 contentText = string.Join("\n", textParts);
             }
 
-            // Usage metadata
-            int promptTokens = 0;
-            int completionTokens = 0;
-            int totalTokens = 0;
-
-            if (root.TryGetProperty("usageMetadata", out var usage))
-            {
-                if (usage.TryGetProperty("promptTokenCount", out var pt)) promptTokens = pt.GetInt32();
-                if (usage.TryGetProperty("candidatesTokenCount", out var ctEl)) completionTokens = ctEl.GetInt32();
-                if (usage.TryGetProperty("totalTokenCount", out var tt)) totalTokens = tt.GetInt32();
-            }
-
             return new AiResponse(
                 Content: contentText,
                 PromptTokens: promptTokens,
                 CompletionTokens: completionTokens,
-                TotalTokens: totalTokens > 0 ? totalTokens : promptTokens + completionTokens,
+                TotalTokens: totalTokens,
                 ModelUsed: model,
                 FinishReason: finishReason
             );

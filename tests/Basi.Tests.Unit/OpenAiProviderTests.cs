@@ -150,4 +150,44 @@ public class OpenAiProviderTests
 
         Assert.DoesNotContain(canarySecret, ex.Message);
     }
+
+    [Fact]
+    public async Task CompleteAsync_ContentFilteredWithUsage_PreservesTokensInAiProviderError()
+    {
+        // Audit repro M02: Upstream returns HTTP 200 with finish_reason=content_filter and usage metadata
+        var responseJson = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new { role = "assistant", content = "" },
+                    finish_reason = "content_filter"
+                }
+            },
+            usage = new
+            {
+                prompt_tokens = 9,
+                completion_tokens = 6,
+                total_tokens = 15
+            }
+        });
+
+        var handler = new MockHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+        });
+
+        var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, "sk-test-openai");
+
+        var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
+            provider.CompleteAsync(new AiRequest("gpt-4o-mini", "system", "harmful prompt")));
+
+        Assert.Equal(AiErrorCode.ContentFiltered, ex.ErrorCode);
+        Assert.Equal(9, ex.PromptTokens);
+        Assert.Equal(6, ex.CompletionTokens);
+        Assert.Equal(15, ex.TotalTokens);
+        Assert.Equal("gpt-4o-mini", ex.ModelUsed);
+    }
 }

@@ -94,9 +94,31 @@ public sealed class OpenAiProvider : IAiProvider
         {
             var root = doc.RootElement;
 
+            // Usage metadata parsed first so tokens are preserved even on content filter or error responses
+            int promptTokens = 0;
+            int completionTokens = 0;
+            int totalTokens = 0;
+
+            if (root.TryGetProperty("usage", out var usage))
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var pt)) promptTokens = pt.GetInt32();
+                if (usage.TryGetProperty("completion_tokens", out var ctEl)) completionTokens = ctEl.GetInt32();
+                if (usage.TryGetProperty("total_tokens", out var tt)) totalTokens = tt.GetInt32();
+            }
+            if (totalTokens == 0 && (promptTokens > 0 || completionTokens > 0))
+            {
+                totalTokens = promptTokens + completionTokens;
+            }
+
             if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
             {
-                throw new AiProviderError(AiErrorCode.Unknown, "OpenAI returned an empty choices array.");
+                throw new AiProviderError(
+                    AiErrorCode.Unknown,
+                    "OpenAI returned an empty choices array.",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             var firstChoice = choices[0];
@@ -111,12 +133,24 @@ public sealed class OpenAiProvider : IAiProvider
 
             if (finishReason == FinishReason.ContentFiltered)
             {
-                throw new AiProviderError(AiErrorCode.ContentFiltered, "OpenAI blocked the completion due to content safety policy.");
+                throw new AiProviderError(
+                    AiErrorCode.ContentFiltered,
+                    "OpenAI blocked the completion due to content safety policy.",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             if (finishReason == FinishReason.Error)
             {
-                throw new AiProviderError(AiErrorCode.Unknown, "OpenAI completion did not finish successfully.");
+                throw new AiProviderError(
+                    AiErrorCode.Unknown,
+                    "OpenAI completion did not finish successfully.",
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    totalTokens: totalTokens,
+                    modelUsed: model);
             }
 
             var contentText = string.Empty;
@@ -126,22 +160,11 @@ public sealed class OpenAiProvider : IAiProvider
                 contentText = contentEl.GetString() ?? string.Empty;
             }
 
-            int promptTokens = 0;
-            int completionTokens = 0;
-            int totalTokens = 0;
-
-            if (root.TryGetProperty("usage", out var usage))
-            {
-                if (usage.TryGetProperty("prompt_tokens", out var pt)) promptTokens = pt.GetInt32();
-                if (usage.TryGetProperty("completion_tokens", out var ctEl)) completionTokens = ctEl.GetInt32();
-                if (usage.TryGetProperty("total_tokens", out var tt)) totalTokens = tt.GetInt32();
-            }
-
             return new AiResponse(
                 Content: contentText,
                 PromptTokens: promptTokens,
                 CompletionTokens: completionTokens,
-                TotalTokens: totalTokens > 0 ? totalTokens : promptTokens + completionTokens,
+                TotalTokens: totalTokens,
                 ModelUsed: model,
                 FinishReason: finishReason
             );

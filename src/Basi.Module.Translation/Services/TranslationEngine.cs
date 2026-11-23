@@ -79,7 +79,20 @@ public sealed class TranslationEngine : ITranslationEngine
             Temperature: 0.7
         );
 
-        var response = await provider.CompleteAsync(request, ct);
+        AiResponse response;
+        try
+        {
+            response = await provider.CompleteAsync(request, ct);
+        }
+        catch (AiProviderError ex) when (ex.ErrorCode != AiErrorCode.InvalidApiKey)
+        {
+            throw new TranslationBatchException(
+                ex.Message,
+                ex.PromptTokens,
+                ex.CompletionTokens,
+                ex.TotalTokens,
+                ex.ModelUsed ?? model);
+        }
 
         // F03 & R11: Only accept successful completion (FinishReason.Stop). Carry token usage in exception!
         if (response.FinishReason == FinishReason.MaxTokens)
