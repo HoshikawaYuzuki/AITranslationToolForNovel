@@ -23,4 +23,16 @@ public interface IApiKeyVault
 
     /// <summary>Clears all keys for a user from RAM.</summary>
     void ClearAll(Guid userId);
+
+    /// <summary>Sets a RAM-only API key bound specifically to a single Job lifecycle.</summary>
+    void SetJobKey(Guid jobId, string apiKey);
+
+    /// <summary>Retrieves the RAM-only API key bound to a single Job, if any.</summary>
+    string? GetJobKey(Guid jobId);
+
+    /// <summary>Checks whether a RAM-only API key exists for a specific Job.</summary>
+    bool HasJobKey(Guid jobId);
+
+    /// <summary>Removes the RAM-only API key bound to a specific Job.</summary>
+    bool RemoveJobKey(Guid jobId);
 }

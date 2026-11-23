@@ -78,42 +78,25 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         var duplicateOrders = new List<int>();
         var unexpectedOrders = new List<int>();
 
-        // M01: Validate all segment tag structures to reject malformed/non-integer tags (e.g. [SEG:abc], [SEG:], [SEG:-1])
+        // N01 / M01: Unified strict tag validation pass for all [SEG:...] occurrences
+        // Grammar strictly requires: [SEG:\d+] with non-negative integer, no whitespace, no sign
         var allTagsPattern = AllSegmentTagsRegex();
         foreach (Match tagMatch in allTagsPattern.Matches(content))
         {
-            var tagVal = tagMatch.Groups[1].Value.Trim();
-            if (!int.TryParse(tagVal, out var parsedOrder) || parsedOrder < 0)
+            var rawTag = tagMatch.Groups[1].Value;
+            if (!DigitsOnlyRegex().IsMatch(rawTag) || !int.TryParse(rawTag, out var order) || order < 0)
             {
                 throw new InvalidOperationException(
                     $"Model response contained malformed segment tag: '{tagMatch.Value}'");
             }
-        }
 
-        var pattern = SegmentTagRegex();
-        var matches = pattern.Matches(content);
-
-        foreach (Match match in matches)
-        {
-            if (int.TryParse(match.Groups[1].Value, out var order))
+            if (!seenOrders.Add(order))
             {
-                if (!seenOrders.Add(order))
-                {
-                    duplicateOrders.Add(order);
-                    continue;
-                }
-
-                if (!expectedSet.Contains(order))
-                {
-                    unexpectedOrders.Add(order);
-                    continue;
-                }
-
-                var text = match.Groups[2].Value.Trim();
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    result[order] = text;
-                }
+                duplicateOrders.Add(order);
+            }
+            else if (!expectedSet.Contains(order))
+            {
+                unexpectedOrders.Add(order);
             }
         }
 
@@ -129,12 +112,28 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
                 $"Model response contained unexpected segment tags: {string.Join(", ", unexpectedOrders.Distinct())}");
         }
 
+        var pattern = SegmentTagRegex();
+        var matches = pattern.Matches(content);
+
+        foreach (Match match in matches)
+        {
+            var order = int.Parse(match.Groups[1].Value);
+            var text = match.Groups[2].Value.Trim();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                result[order] = text;
+            }
+        }
+
         return result;
     }
+
+    [GeneratedRegex(@"^\d+$")]
+    private static partial Regex DigitsOnlyRegex();
 
     [GeneratedRegex(@"\[SEG:([^\]]*)\]")]
     private static partial Regex AllSegmentTagsRegex();
 
-    [GeneratedRegex(@"\[SEG:(\d+)\]\s*([\s\S]*?)(?=(?:\[SEG:[^\]]*\])|\z)")]
+    [GeneratedRegex(@"\[SEG:(\d+)\]\s*([\s\S]*?)(?=(?:\[SEG:\d+\])|\z)")]
     private static partial Regex SegmentTagRegex();
 }

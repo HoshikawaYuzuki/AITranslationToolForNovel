@@ -13,6 +13,9 @@ public sealed class InMemoryApiKeyVault : IApiKeyVault
     // userId -> (normalizedProvider -> apiKey)
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, string>> _vault = new();
 
+    // jobId -> apiKey (Job-bound RAM keys)
+    private readonly ConcurrentDictionary<Guid, string> _jobKeys = new();
+
     public void SetKey(Guid userId, string provider, string apiKey)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(provider);
@@ -71,6 +74,27 @@ public sealed class InMemoryApiKeyVault : IApiKeyVault
     public void ClearAll(Guid userId)
     {
         _vault.TryRemove(userId, out _);
+    }
+
+    public void SetJobKey(Guid jobId, string apiKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        _jobKeys[jobId] = apiKey.Trim();
+    }
+
+    public string? GetJobKey(Guid jobId)
+    {
+        return _jobKeys.TryGetValue(jobId, out var key) ? key : null;
+    }
+
+    public bool HasJobKey(Guid jobId)
+    {
+        return _jobKeys.ContainsKey(jobId);
+    }
+
+    public bool RemoveJobKey(Guid jobId)
+    {
+        return _jobKeys.TryRemove(jobId, out _);
     }
 
     private static string NormalizeProvider(string provider) => provider.Trim().ToLowerInvariant();

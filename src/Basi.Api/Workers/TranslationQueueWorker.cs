@@ -21,6 +21,7 @@ public sealed class TranslationQueueWorker : BackgroundService
     private const int MaxBatchChars = 3000;
     private const int MaxSingleSegmentChars = 12000;
     private const int MaxContextChars = 1500;
+    private static readonly TimeSpan LeaseTimeout = TimeSpan.FromMinutes(5);
 
     public TranslationQueueWorker(
         IServiceScopeFactory scopeFactory,
@@ -69,16 +70,19 @@ public sealed class TranslationQueueWorker : BackgroundService
         var translationEngine = scope.ServiceProvider.GetRequiredService<ITranslationEngine>();
         var apiKeyVault = scope.ServiceProvider.GetRequiredService<IApiKeyVault>();
 
-        // Pick candidate Queued or interrupted Processing job
+        // N02 / F08: Exclusive claim condition
+        // A job can only be claimed if it is Queued OR stalled in Processing beyond LeaseTimeout
+        var staleThreshold = DateTime.UtcNow - LeaseTimeout;
+
         var candidate = await db.TranslationJobs
-            .Where(j => j.Status == JobStatus.Queued || j.Status == JobStatus.Processing)
+            .Where(j => j.Status == JobStatus.Queued || (j.Status == JobStatus.Processing && j.UpdatedAt < staleThreshold))
             .OrderBy(j => j.CreatedAt)
             .Select(j => new { j.Id, j.Status })
             .FirstOrDefaultAsync(ct);
 
         if (candidate == null) return false;
 
-        // F08: Prevent double processing in this process
+        // In-process guard preventing concurrent execution in the same process
         if (!_activeJobClaims.TryAdd(candidate.Id, 0))
         {
             return false;
@@ -86,16 +90,30 @@ public sealed class TranslationQueueWorker : BackgroundService
 
         try
         {
-            // F08: Atomic claim state transition
+            // N02 / F08: Cross-process atomic conditional claim
+            // If already claimed by another process (Status == Processing && UpdatedAt >= staleThreshold), 0 rows updated
             if (db.Database.IsRelational())
             {
                 var rowsClaimed = await db.TranslationJobs
-                    .Where(j => j.Id == candidate.Id && (j.Status == JobStatus.Queued || j.Status == JobStatus.Processing))
+                    .Where(j => j.Id == candidate.Id && (j.Status == JobStatus.Queued || (j.Status == JobStatus.Processing && j.UpdatedAt < staleThreshold)))
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(j => j.Status, JobStatus.Processing)
                         .SetProperty(j => j.UpdatedAt, DateTime.UtcNow), ct);
 
                 if (rowsClaimed == 0) return false;
+            }
+            else
+            {
+                // InMemory / test environment fallback
+                var entity = await db.TranslationJobs.FirstOrDefaultAsync(j => j.Id == candidate.Id, ct);
+                if (entity == null) return false;
+                if (entity.Status != JobStatus.Queued && !(entity.Status == JobStatus.Processing && entity.UpdatedAt < staleThreshold))
+                {
+                    return false;
+                }
+                entity.Status = JobStatus.Processing;
+                entity.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
             }
 
             var job = await db.TranslationJobs
@@ -110,10 +128,11 @@ public sealed class TranslationQueueWorker : BackgroundService
 
             _logger.LogInformation("Processing translation job {JobId} for novel '{NovelTitle}'", job.Id, job.Novel?.Title);
 
-            // 1. Initial key existence check for non-mock providers
+            // 1. Initial key existence check (F04: check Job-bound key first, then user key)
             if (!string.Equals(job.Provider, "mock", StringComparison.OrdinalIgnoreCase))
             {
-                if (!apiKeyVault.HasKey(job.OwnerId, job.Provider))
+                var hasKey = apiKeyVault.HasJobKey(job.Id) || apiKeyVault.HasKey(job.OwnerId, job.Provider);
+                if (!hasKey)
                 {
                     _logger.LogWarning("Job {JobId} paused: API key missing for provider {Provider}.", job.Id, job.Provider);
                     job.Status = JobStatus.WaitingForApiKey;
@@ -214,7 +233,8 @@ public sealed class TranslationQueueWorker : BackgroundService
                 // Verify API key is still valid and present in RAM vault before executing batch (F04)
                 if (!string.Equals(job.Provider, "mock", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!apiKeyVault.HasKey(job.OwnerId, job.Provider))
+                    var hasKey = apiKeyVault.HasJobKey(job.Id) || apiKeyVault.HasKey(job.OwnerId, job.Provider);
+                    if (!hasKey)
                     {
                         _logger.LogWarning("Job {JobId} paused during processing: API key was revoked or cleared from RAM.", job.Id);
                         foreach (var seg in batch) seg.Status = SegmentStatus.Pending;
@@ -258,7 +278,7 @@ public sealed class TranslationQueueWorker : BackgroundService
 
                 try
                 {
-                    var provider = providerFactory.GetProviderForUser(job.OwnerId, job.Provider);
+                    var provider = providerFactory.GetProviderForJob(job.OwnerId, job.Provider, job.Id);
 
                     var batchResult = await translationEngine.TranslateBatchAsync(
                         provider,
@@ -382,6 +402,9 @@ public sealed class TranslationQueueWorker : BackgroundService
                 job.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
             }
+
+            // F04: Purge Job-bound key from RAM upon reaching terminal state
+            apiKeyVault.RemoveJobKey(job.Id);
 
             return true;
         }

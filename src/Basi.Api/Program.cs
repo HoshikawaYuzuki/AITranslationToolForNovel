@@ -235,7 +235,9 @@ app.MapPost("/api/auth/logout", async (
     HttpContext ctx,
     IAntiforgery antiforgery,
     UserManager<ApplicationUser> userManager,
-    IApiKeyVault keyVault) =>
+    IApiKeyVault keyVault,
+    BasiDbContext db,
+    Basi.Core.Interfaces.IJobCancellationRegistry cancellationRegistry) =>
 {
     try
     {
@@ -253,6 +255,16 @@ app.MapPost("/api/auth/logout", async (
         if (user != null)
         {
             keyVault.ClearAll(user.Id);
+
+            // In-flight abort: cancel any active jobs for this user upon logout
+            var activeJobIds = await db.TranslationJobs
+                .Where(j => j.OwnerId == user.Id && (j.Status == JobStatus.Queued || j.Status == JobStatus.Processing))
+                .Select(j => j.Id)
+                .ToListAsync();
+            foreach (var jId in activeJobIds)
+            {
+                cancellationRegistry.TryCancelJob(jId);
+            }
         }
     }
 
@@ -343,6 +355,8 @@ app.MapDelete("/api/auth/api-keys/{provider}", async (
     string provider,
     UserManager<ApplicationUser> userManager,
     IApiKeyVault keyVault,
+    BasiDbContext db,
+    Basi.Core.Interfaces.IJobCancellationRegistry cancellationRegistry,
     IAntiforgery antiforgery) =>
 {
     try
@@ -364,6 +378,17 @@ app.MapDelete("/api/auth/api-keys/{provider}", async (
     if (user is null) return Results.Unauthorized();
 
     var removed = keyVault.RemoveKey(user.Id, provider);
+
+    // In-flight abort: cancel any active jobs using this provider upon key deletion
+    var activeJobIds = await db.TranslationJobs
+        .Where(j => j.OwnerId == user.Id && j.Provider.ToLower() == provider.ToLower() && (j.Status == JobStatus.Queued || j.Status == JobStatus.Processing))
+        .Select(j => j.Id)
+        .ToListAsync();
+    foreach (var jId in activeJobIds)
+    {
+        cancellationRegistry.TryCancelJob(jId);
+    }
+
     return Results.Ok(new { success = removed, provider = provider.ToLowerInvariant() });
 }).RequireAuthorization();
 
@@ -619,6 +644,7 @@ app.MapPost("/api/translations", async (
     CreateTranslationRequest req,
     BasiDbContext db,
     UserManager<ApplicationUser> userManager,
+    IApiKeyVault keyVault,
     IAntiforgery antiforgery,
     CancellationToken ct) =>
 {
@@ -711,6 +737,12 @@ app.MapPost("/api/translations", async (
     db.TranslationJobs.Add(job);
     db.TranslatedSegments.AddRange(translatedSegments);
     await db.SaveChangesAsync(ct);
+
+    // F04: If client provides a Job-bound API key, store in RAM vault keyed to this specific Job
+    if (!string.IsNullOrWhiteSpace(req.ApiKey))
+    {
+        keyVault.SetJobKey(job.Id, req.ApiKey.Trim());
+    }
 
     return Results.Created($"/api/translations/{job.Id}", new
     {
@@ -929,4 +961,4 @@ public partial class Program { }
 
 public record TestSignInRequest(string GoogleId);
 public record SetApiKeyRequest(string Provider, string ApiKey);
-public record CreateTranslationRequest(Guid NovelId, string TargetLanguage, string Provider, string? Model);
+public record CreateTranslationRequest(Guid NovelId, string TargetLanguage, string Provider, string? Model, string? ApiKey = null);

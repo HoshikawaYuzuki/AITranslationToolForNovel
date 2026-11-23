@@ -55,4 +55,26 @@ public sealed class AiProviderFactory : IAiProviderFactory
 
         return CreateProvider(providerName, key);
     }
+
+    public IAiProvider GetProviderForJob(Guid userId, string providerName, Guid jobId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerName);
+
+        var norm = providerName.Trim().ToLowerInvariant();
+        if (norm == "mock")
+        {
+            return _serviceProvider.GetService<MockAiProvider>() ?? new MockAiProvider();
+        }
+
+        // Job-bound key takes priority; fall back to session/user-bound key
+        var key = _apiKeyVault.GetJobKey(jobId) ?? _apiKeyVault.GetKey(userId, norm);
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new AiProviderError(
+                AiErrorCode.InvalidApiKey,
+                $"No API key found in RAM for provider '{providerName}'. Please provide your API key before starting translation.");
+        }
+
+        return CreateProvider(providerName, key);
+    }
 }

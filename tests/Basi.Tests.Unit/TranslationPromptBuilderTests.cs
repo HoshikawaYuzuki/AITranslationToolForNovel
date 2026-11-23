@@ -126,6 +126,9 @@ public class TranslationPromptBuilderTests
     [InlineData("[SEG:0] text [SEG:abc] bad", "malformed segment tag")]
     [InlineData("[SEG:0] text [SEG:] empty tag", "malformed segment tag")]
     [InlineData("[SEG:0] text [SEG:-1] negative tag", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG:+1] plus sign tag", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG:99 ] trailing space tag", "malformed segment tag")]
+    [InlineData("[SEG:0] text [SEG: 99] leading space tag", "malformed segment tag")]
     [InlineData("[SEG:0] text [SEG:999999999999999999999999999999] overflow tag", "malformed segment tag")]
     public void ParseResponse_MalformedTag_ThrowsInvalidOperationException(string response, string expectedErrorMessage)
     {
