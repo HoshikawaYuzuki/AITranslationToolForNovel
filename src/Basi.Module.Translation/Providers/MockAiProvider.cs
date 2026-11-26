@@ -44,8 +44,17 @@ public class MockAiProvider : IAiProvider
         var completionTokens = 150; // Realistic mock count
 
         string content;
+        var promptText = request.UserPrompt;
+        const string segmentsMarker = "--- SEGMENTS TO TRANSLATE ---";
+        var markerIndex = promptText.IndexOf(segmentsMarker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex >= 0)
+        {
+            // Only translate target segments under the marker, ignoring any preceding context segments
+            promptText = promptText.Substring(markerIndex + segmentsMarker.Length);
+        }
+
         var segMatches = System.Text.RegularExpressions.Regex.Matches(
-            request.UserPrompt,
+            promptText,
             @"\[SEG:(\d+)\]\s*([^\r\n]+)");
 
         if (segMatches.Count > 0)

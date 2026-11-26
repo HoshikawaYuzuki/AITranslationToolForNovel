@@ -1,5 +1,6 @@
 using Basi.Core.Interfaces;
 using Basi.Core.Models;
+using Basi.Module.Translation.Providers;
 using Basi.Module.Translation.Services;
 using Xunit;
 
@@ -152,5 +153,43 @@ public class TranslationEngineTests
 
         Assert.Contains("FinishReason", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(10, ex.TotalTokens);
+    }
+
+    [Fact]
+    public async Task TranslateBatchAsync_ConsecutiveBatchesWithContext_MockProviderTranslatesSuccessfully()
+    {
+        var mockProvider = new MockAiProvider(new MockAiProviderOptions { Scenario = MockScenario.Success });
+
+        // Batch 1: segments 0, 1 (no context)
+        var batch1 = new[]
+        {
+            new SegmentItem(0, "Source sentence 0"),
+            new SegmentItem(1, "Source sentence 1")
+        };
+
+        var result1 = await _engine.TranslateBatchAsync(mockProvider, "mock-v1", "en", "vi", batch1);
+        Assert.Equal(2, result1.Translations.Count);
+        Assert.True(result1.Translations.ContainsKey(0));
+        Assert.True(result1.Translations.ContainsKey(1));
+
+        // Batch 2: segments 2, 3 with context from batch 1
+        var context = new[]
+        {
+            new ContextSegmentItem(0, "Source sentence 0", result1.Translations[0]),
+            new ContextSegmentItem(1, "Source sentence 1", result1.Translations[1])
+        };
+        var batch2 = new[]
+        {
+            new SegmentItem(2, "Source sentence 2"),
+            new SegmentItem(3, "Source sentence 3")
+        };
+
+        // F11 Regression check: Must NOT throw "Model returned unexpected segment identifiers"
+        var result2 = await _engine.TranslateBatchAsync(mockProvider, "mock-v1", "en", "vi", batch2, context);
+        Assert.Equal(2, result2.Translations.Count);
+        Assert.True(result2.Translations.ContainsKey(2));
+        Assert.True(result2.Translations.ContainsKey(3));
+        Assert.False(result2.Translations.ContainsKey(0));
+        Assert.False(result2.Translations.ContainsKey(1));
     }
 }

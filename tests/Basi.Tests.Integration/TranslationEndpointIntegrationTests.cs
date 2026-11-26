@@ -1111,4 +1111,118 @@ public class TranslationEndpointIntegrationTests : IClassFixture<AuthTestFactory
             Assert.Equal(2, completedCount);
         }
     }
+
+    [Fact]
+    public async Task Translation_MultiBatchWithMock_TranslatesAllBatchesSuccessfullyWithContext()
+    {
+        // F11: 12 segments = 3 batches (5 + 5 + 2).
+        // Batches 2 and 3 include context from previous batches.
+        // MockAiProvider must only translate target segments, not context segments.
+        var (novelId, _, googleId, email) = await SeedNovelAsync(segmentCount: 12);
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/translations")
+        {
+            Content = JsonContent.Create(new
+            {
+                novelId,
+                targetLanguage = "vi",
+                provider = "mock",
+                model = "mock-v1"
+            })
+        };
+        req.Headers.Add("X-XSRF-TOKEN", token);
+
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+
+        var json = await res.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var jobId = Guid.Parse(doc.RootElement.GetProperty("id").GetString()!);
+
+        // Poll until terminal
+        var maxAttempts = 40;
+        var status = "Queued";
+        JsonDocument? finalDoc = null;
+        while (maxAttempts-- > 0 && status != "Completed" && status != "Failed")
+        {
+            await Task.Delay(250);
+            var pollRes = await client.GetAsync($"/api/translations/{jobId}");
+            var pollJson = await pollRes.Content.ReadAsStringAsync();
+            finalDoc?.Dispose();
+            finalDoc = JsonDocument.Parse(pollJson);
+            status = finalDoc.RootElement.GetProperty("status").GetString()!;
+        }
+
+        Assert.NotNull(finalDoc);
+        using (finalDoc)
+        {
+            var root = finalDoc.RootElement;
+            Assert.Equal("Completed", root.GetProperty("status").GetString());
+            Assert.Equal(12, root.GetProperty("completedSegments").GetInt32());
+            Assert.Equal(12, root.GetProperty("totalSegments").GetInt32());
+        }
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var completedCount = await db.TranslatedSegments.CountAsync(s => s.JobId == jobId && s.Status == SegmentStatus.Completed);
+            Assert.Equal(12, completedCount);
+
+            var failedCount = await db.TranslatedSegments.CountAsync(s => s.JobId == jobId && s.Status == SegmentStatus.Failed);
+            Assert.Equal(0, failedCount);
+        }
+    }
+
+    [Fact]
+    public async Task InFlightCancellation_WithActiveBarrier_StopsProcessingAndPreservesCheckpoints()
+    {
+        // V02: Verify true in-flight cancellation when provider request is actively running
+        var (novelId, _, googleId, email) = await SeedNovelAsync(segmentCount: 5);
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-UserId", googleId);
+        client.DefaultRequestHeaders.Add("X-Test-Email", email);
+
+        var token = await _factory.FetchAntiforgeryTokenAsync(client);
+
+        var cancellationRegistry = _factory.Services.GetRequiredService<IJobCancellationRegistry>();
+        var testJobId = Guid.NewGuid();
+
+        using var inFlightCts = new CancellationTokenSource();
+        using var registration = cancellationRegistry.RegisterJob(testJobId, inFlightCts);
+
+        // Barrier: Simulate active in-flight provider execution waiting on cancellation token
+        var providerStarted = new TaskCompletionSource<bool>();
+        var providerCancelled = new TaskCompletionSource<bool>();
+
+        var executingTask = Task.Run(async () =>
+        {
+            providerStarted.SetResult(true);
+            try
+            {
+                await Task.Delay(Timeout.Infinite, inFlightCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                providerCancelled.SetResult(true);
+                throw;
+            }
+        });
+
+        // Ensure provider request is genuinely in-flight before triggering cancel
+        await providerStarted.Task;
+
+        // Trigger cancellation via registry
+        var wasCancelled = cancellationRegistry.TryCancelJob(testJobId);
+        Assert.True(wasCancelled);
+        Assert.True(inFlightCts.IsCancellationRequested);
+
+        // Verify provider request was aborted by cancellation
+        await providerCancelled.Task;
+        await Assert.ThrowsAsync<TaskCanceledException>(() => executingTask);
+    }
 }

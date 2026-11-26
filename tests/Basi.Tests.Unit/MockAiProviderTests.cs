@@ -101,4 +101,38 @@ public class MockAiProviderTests
         Assert.DoesNotContain("[seg-003]", response.Content);
         Assert.Equal(FinishReason.MaxTokens, response.FinishReason);
     }
+
+    [Fact]
+    public async Task Test_Success_WithContextInUserPrompt_TranslatesOnlyTargetSegmentsAndExcludesContext()
+    {
+        var provider = new MockAiProvider(new MockAiProviderOptions
+        {
+            Scenario = MockScenario.Success
+        });
+
+        var userPromptWithContext =
+            "--- RECENT CONTEXT (FOR CONTINUITY ONLY — DO NOT TRANSLATE AGAIN) ---\n" +
+            "[SEG:0] Đoạn dịch cũ 0\n" +
+            "[SEG:1] Đoạn dịch cũ 1\n\n" +
+            "--- SEGMENTS TO TRANSLATE ---\n" +
+            "[SEG:2] Đoạn nguồn 2\n" +
+            "[SEG:3] Đoạn nguồn 3";
+
+        var request = new AiRequest(
+            Model: "mock-v1",
+            SystemPrompt: "Translate segments.",
+            UserPrompt: userPromptWithContext,
+            MaxTokens: 1024,
+            Temperature: 0.7);
+
+        var response = await provider.CompleteAsync(request);
+
+        Assert.NotNull(response);
+        // Must contain target segments
+        Assert.Contains("[SEG:2]", response.Content);
+        Assert.Contains("[SEG:3]", response.Content);
+        // Must NOT contain context segments!
+        Assert.DoesNotContain("[SEG:0]", response.Content);
+        Assert.DoesNotContain("[SEG:1]", response.Content);
+    }
 }
