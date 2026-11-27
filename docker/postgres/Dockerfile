@@ -42,8 +42,10 @@ RUN chmod +x /usr/local/bin/docker-*
 # 4. Add PostgreSQL binary path to PATH
 ENV PATH="/usr/lib/postgresql/17/bin:${PATH}"
 
-# 5. Create directories with postgres permissions
-RUN mkdir -p /var/lib/postgresql/data /docker-entrypoint-initdb.d /var/run/postgresql \
+# 5. Ensure new databases accept TCP connections over port mappings and prepare directories
+RUN sed -ri "s!^#?(listen_addresses)\s*=\s*\S+.*!\1 = '*'!" "/usr/share/postgresql/${PG_MAJOR}/postgresql.conf.sample" \
+    && grep -F "listen_addresses = '*'" "/usr/share/postgresql/${PG_MAJOR}/postgresql.conf.sample" \
+    && mkdir -p /var/lib/postgresql/data /docker-entrypoint-initdb.d /var/run/postgresql \
     && chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql
 
 VOLUME /var/lib/postgresql/data
