@@ -88,6 +88,82 @@ namespace Basi.Api.Migrations
                     b.ToTable("Segments");
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.StoryEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Aliases")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<int?>("FirstSeenOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("NormalizedSourceTerm")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid>("NovelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SourceTerm")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("TargetLanguage")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TranslatedTerm")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerId");
+
+                    b.HasIndex("NovelId", "TargetLanguage", "NormalizedSourceTerm")
+                        .IsUnique();
+
+                    b.ToTable("StoryEntities");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.TranslatedSegment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -443,6 +519,23 @@ namespace Basi.Api.Migrations
                     b.Navigation("Novel");
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.StoryEntity", b =>
+                {
+                    b.HasOne("Basi.Core.Models.Novel", "Novel")
+                        .WithMany("StoryEntities")
+                        .HasForeignKey("NovelId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Basi.Module.Identity.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Novel");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.TranslatedSegment", b =>
                 {
                     b.HasOne("Basi.Core.Models.TranslationJob", "Job")
@@ -533,6 +626,8 @@ namespace Basi.Api.Migrations
             modelBuilder.Entity("Basi.Core.Models.Novel", b =>
                 {
                     b.Navigation("Segments");
+
+                    b.Navigation("StoryEntities");
                 });
 
             modelBuilder.Entity("Basi.Core.Models.TranslationJob", b =>

@@ -1,4 +1,5 @@
 using Basi.Api.Data;
+using Basi.Api.Endpoints;
 using Basi.Core.Models;
 using Basi.Module.Identity;
 using Basi.Module.Identity.Models;
@@ -1035,6 +1036,8 @@ app.MapGet("/api/health", async (BasiDbContext db, CancellationToken ct) =>
         database = dbStatus
     });
 });
+
+app.MapStoryMemoryEndpoints();
 
 app.Run();
 

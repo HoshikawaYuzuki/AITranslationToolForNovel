@@ -19,6 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Basi.Core\Basi.Core.csproj" />
     <ProjectReference Include="..\..\src\Basi.Module.Translation\Basi.Module.Translation.csproj" />
+    <ProjectReference Include="..\..\src\Basi.Module.StoryMemory\Basi.Module.StoryMemory.csproj" />
     <ProjectReference Include="..\..\src\Basi.Api\Basi.Api.csproj" />
   </ItemGroup>
 </Project>

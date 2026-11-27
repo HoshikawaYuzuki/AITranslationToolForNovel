@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Basi.Api.Data;
 using Basi.Core.Interfaces;
 using Basi.Core.Models;
+using Basi.Module.StoryMemory.Services;
 using Basi.Module.Translation.Providers;
 using Basi.Module.Translation.Services;
 using Microsoft.EntityFrameworkCore;
@@ -55,17 +56,19 @@ public sealed class TranslationQueueWorker : BackgroundService
         _workerInstanceId = string.IsNullOrWhiteSpace(workerInstanceId) ? "default" : workerInstanceId;
     }
 
-    internal static int EstimatePreflightInputTokens(int batchChars, int batchCount, int contextChars, int contextCount)
+    internal static int EstimatePreflightInputTokens(int batchChars, int batchCount, int contextChars, int contextCount, int glossaryChars = 0, int glossaryCount = 0)
     {
         const int systemPromptTokens = 160;
+        var glossaryOverhead = glossaryCount > 0 ? 20 + (glossaryChars / 3) + (glossaryCount * 6) : 0;
         return systemPromptTokens
             + (batchChars / 3) + (batchCount * 8)
-            + (contextChars / 3) + (contextCount * 8);
+            + (contextChars / 3) + (contextCount * 8)
+            + glossaryOverhead;
     }
 
-    internal static int EstimatePreflightBatchTokens(int batchChars, int batchCount, int contextChars, int contextCount)
+    internal static int EstimatePreflightBatchTokens(int batchChars, int batchCount, int contextChars, int contextCount, int glossaryChars = 0, int glossaryCount = 0)
     {
-        var inputTokens = EstimatePreflightInputTokens(batchChars, batchCount, contextChars, contextCount);
+        var inputTokens = EstimatePreflightInputTokens(batchChars, batchCount, contextChars, contextCount, glossaryChars, glossaryCount);
         var expectedOutputTokens = Math.Max(150, (batchChars / 2) + (batchCount * 8));
         return inputTokens + expectedOutputTokens;
     }
@@ -195,6 +198,11 @@ public sealed class TranslationQueueWorker : BackgroundService
                 }
 
                 var sourceLanguage = job.Novel?.SourceLanguage ?? "ja";
+                var storyMemorySelector = scope.ServiceProvider.GetService<IStoryMemorySelector>() ?? new StoryMemorySelector();
+                var storyEntities = await db.StoryEntities
+                    .AsNoTracking()
+                    .Where(e => e.NovelId == job.NovelId && e.TargetLanguage.ToLower() == job.TargetLanguage.ToLower())
+                    .ToListAsync(jobCts.Token);
 
                 var effectiveRunDuration = RunDurationOverrideForTesting ?? MaxJobRunDuration;
 
@@ -319,10 +327,17 @@ public sealed class TranslationQueueWorker : BackgroundService
                     }
                     contextHistory.Reverse();
 
+                    // BASI-004: Select batch-relevant bounded story memory / glossary terms
+                    var glossaryTerms = storyMemorySelector.SelectForBatch(
+                        storyEntities,
+                        batch.Select(b => b.SourceText).ToList(),
+                        contextHistory.Select(c => c.SourceText).ToList());
+                    var glossaryChars = glossaryTerms.Sum(StoryMemorySelector.EstimatePromptLineLength);
+
                     // F07: Preflight token budget check & output cap BEFORE dispatching provider request
                     var remainingBudget = Math.Max(0, MaxJobTotalTokens - currentTotalTokens);
-                    var estimatedInputTokens = EstimatePreflightInputTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count);
-                    var estimatedBatchTokens = EstimatePreflightBatchTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count);
+                    var estimatedInputTokens = EstimatePreflightInputTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, glossaryChars, glossaryTerms.Count);
+                    var estimatedBatchTokens = EstimatePreflightBatchTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, glossaryChars, glossaryTerms.Count);
                     if (currentTotalTokens + estimatedBatchTokens > MaxJobTotalTokens)
                     {
                         _logger.LogWarning(
@@ -387,7 +402,8 @@ public sealed class TranslationQueueWorker : BackgroundService
                             batchItems,
                             contextHistory,
                             deadlineCts.Token,
-                            maxOutputTokensForRequest);
+                            maxOutputTokensForRequest,
+                            glossaryTerms);
 
                         var commitLease = NextLeaseTimestamp(currentLease);
                         var nextActualModel = !string.IsNullOrWhiteSpace(batchResult.ModelUsed) ? batchResult.ModelUsed : currentActualModel;

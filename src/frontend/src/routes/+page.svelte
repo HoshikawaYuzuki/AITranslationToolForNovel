@@ -21,6 +21,7 @@
     type TranslationJobSummary,
     type TranslationJobDetail
   } from '$lib/api/client';
+  import StoryMemoryPanel from '$lib/components/StoryMemoryPanel.svelte';
 
   // Health state
   let health = $state<HealthResponse | null>(null);
@@ -71,6 +72,7 @@
 
   let isHealthy = $derived(health?.status === 'healthy');
   let dbConnected = $derived(health?.database === 'connected');
+  let selectedNovel = $derived(novels.find((n) => n.id === selectedNovelId) ?? null);
 
   async function fetchHealth() {
     healthLoading = true;
@@ -723,7 +725,7 @@
                 bind:value={selectedNovelId}
                 class="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
               >
-                {#each novels as nov}
+                {#each novels as nov (nov.id)}
                   <option value={nov.id}>
                     {nov.title} ({nov.sourceLanguage.toUpperCase()} - {nov.segmentCount} segments)
                   </option>
@@ -817,6 +819,17 @@
         </form>
       {/if}
     </section>
+
+    {#if selectedNovel}
+      {#key `${selectedNovel.id}:${targetLanguage}`}
+        <StoryMemoryPanel
+          novelId={selectedNovel.id}
+          novelTitle={selectedNovel.title}
+          {targetLanguage}
+          activeJobId={activeJobDetail?.novelId === selectedNovel.id ? activeJobDetail.id : null}
+        />
+      {/key}
+    {/if}
 
     <!-- Active Translation Job Status & Bilingual Reader -->
     {#if activeJobDetail}
@@ -946,7 +959,7 @@
         <div class="space-y-3">
           <h3 class="text-lg font-semibold tracking-tight">Bilingual Reader View</h3>
           <div class="divide-y divide-gray-100 dark:divide-gray-800 max-h-[500px] overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700">
-            {#each activeJobDetail.segments as seg}
+            {#each activeJobDetail.segments as seg (seg.id)}
               <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm hover:bg-gray-50/50 dark:hover:bg-gray-800/30">
                 <!-- Source Column -->
                 <div class="space-y-1">
@@ -1015,7 +1028,7 @@
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-              {#each jobs as j}
+              {#each jobs as j (j.id)}
                 <tr class="hover:bg-gray-50/50 dark:hover:bg-gray-800/50">
                   <td class="px-4 py-2.5 font-mono text-xs">{j.id.slice(0, 8)}…</td>
                   <td class="px-4 py-2.5 font-medium">{j.targetLanguage.toUpperCase()}</td>

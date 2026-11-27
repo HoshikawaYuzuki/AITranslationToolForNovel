@@ -46,6 +46,7 @@ public class MockAiProvider : IAiProvider
         string content;
         var promptText = request.UserPrompt;
         const string segmentsMarker = "--- SEGMENTS TO TRANSLATE ---";
+        const string storyMemoryMarker = "--- STORY MEMORY EXTRACTION ---";
         var markerIndex = promptText.IndexOf(segmentsMarker, StringComparison.OrdinalIgnoreCase);
         if (markerIndex >= 0)
         {
@@ -53,11 +54,15 @@ public class MockAiProvider : IAiProvider
             promptText = promptText.Substring(markerIndex + segmentsMarker.Length);
         }
 
-        var segMatches = System.Text.RegularExpressions.Regex.Matches(
-            promptText,
-            @"\[SEG:(\d+)\]\s*([^\r\n]+)");
+        var segMatches = markerIndex >= 0
+            ? System.Text.RegularExpressions.Regex.Matches(promptText, @"\[SEG:(\d+)\]\s*([^\r\n]+)")
+            : System.Text.RegularExpressions.Regex.Matches(string.Empty, @"\[SEG:(\d+)\]");
 
-        if (segMatches.Count > 0)
+        if (markerIndex < 0 && request.UserPrompt.Contains(storyMemoryMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            content = BuildMockStoryMemoryJson(request.UserPrompt);
+        }
+        else if (segMatches.Count > 0)
         {
             var sb = new System.Text.StringBuilder();
             foreach (System.Text.RegularExpressions.Match match in segMatches)
@@ -122,5 +127,85 @@ public class MockAiProvider : IAiProvider
         if (string.IsNullOrEmpty(text)) return 0;
         // Rough estimate: ~4 chars per token
         return Math.Max(1, text.Length / 4);
+    }
+
+    private static string BuildMockStoryMemoryJson(string userPrompt)
+    {
+        const string novelSegmentsMarker = "--- NOVEL SEGMENTS ---";
+        var idx = userPrompt.IndexOf(novelSegmentsMarker, StringComparison.OrdinalIgnoreCase);
+        var slice = idx >= 0 ? userPrompt[(idx + novelSegmentsMarker.Length)..] : userPrompt;
+
+        var targetLangMatch = System.Text.RegularExpressions.Regex.Match(userPrompt, @"TargetLanguage:\s*([^\r\n]+)");
+        var targetLang = targetLangMatch.Success ? targetLangMatch.Groups[1].Value.Trim() : "target";
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entities = new List<object>();
+
+        foreach (System.Text.RegularExpressions.Match segMatch in System.Text.RegularExpressions.Regex.Matches(
+                     slice,
+                     @"\[SEG:(\d+)\]\s*([^\r\n]+)"))
+        {
+            if (!int.TryParse(segMatch.Groups[1].Value, out var order)) order = 0;
+            var text = segMatch.Groups[2].Value.Trim();
+
+            foreach (System.Text.RegularExpressions.Match quoted in System.Text.RegularExpressions.Regex.Matches(
+                         text,
+                         @"[「『""]([^{}「」『""\r\n]{2,32})[」』""]"))
+            {
+                var term = quoted.Groups[1].Value.Trim();
+                if (seen.Add(term))
+                {
+                    entities.Add(new
+                    {
+                        sourceTerm = term,
+                        translatedTerm = $"[{targetLang}] {term}",
+                        category = "Character",
+                        aliases = Array.Empty<string>(),
+                        description = "Mock extracted proper term.",
+                        firstSeenOrder = order
+                    });
+                }
+            }
+
+            foreach (System.Text.RegularExpressions.Match prop in System.Text.RegularExpressions.Regex.Matches(
+                         text,
+                         @"\b([A-Z][a-zA-Z0-9]{2,}(?:\s+[A-Z][a-zA-Z0-9]{2,})?)\b"))
+            {
+                var term = prop.Groups[1].Value.Trim();
+                if (term is "The" or "This" or "That" or "There" or "When" or "After" or "Before") continue;
+                if (seen.Add(term))
+                {
+                    entities.Add(new
+                    {
+                        sourceTerm = term,
+                        translatedTerm = $"[{targetLang}] {term}",
+                        category = "Character",
+                        aliases = Array.Empty<string>(),
+                        description = "Mock extracted proper noun.",
+                        firstSeenOrder = order
+                    });
+                }
+            }
+        }
+
+        if (entities.Count == 0)
+        {
+            var firstSeg = System.Text.RegularExpressions.Regex.Match(slice, @"\[SEG:(\d+)\]\s*([^\r\n]+)");
+            var firstOrder = firstSeg.Success && int.TryParse(firstSeg.Groups[1].Value, out var o) ? o : 0;
+            var sample = firstSeg.Success
+                ? firstSeg.Groups[2].Value.Trim().Split(new[] { ' ', '　', '。', '.' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "Protagonist"
+                : "Protagonist";
+            entities.Add(new
+            {
+                sourceTerm = sample,
+                translatedTerm = $"[{targetLang}] {sample}",
+                category = "Concept",
+                aliases = Array.Empty<string>(),
+                description = "Deterministic mock fallback entity.",
+                firstSeenOrder = firstOrder
+            });
+        }
+
+        return System.Text.Json.JsonSerializer.Serialize(new { entities = entities.Take(10) });
     }
 }

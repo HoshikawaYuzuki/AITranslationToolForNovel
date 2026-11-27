@@ -77,6 +77,97 @@ export interface TranslationJobDetail extends TranslationJobSummary {
   segments: TranslatedSegmentItem[];
 }
 
+export type StoryEntityCategory =
+  | 'Character'
+  | 'Location'
+  | 'Skill'
+  | 'Item'
+  | 'Organization'
+  | 'Concept'
+  | 'Honorific'
+  | 'Other';
+
+export interface StoryEntityItem {
+  id: string;
+  novelId: string;
+  targetLanguage: string;
+  sourceTerm: string;
+  translatedTerm: string;
+  category: StoryEntityCategory;
+  aliases: string[];
+  description?: string | null;
+  origin: 'Manual' | 'AiExtracted';
+  isLocked: boolean;
+  firstSeenOrder?: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertStoryEntityPayload {
+  targetLanguage: string;
+  sourceTerm: string;
+  translatedTerm: string;
+  category?: StoryEntityCategory;
+  aliases?: string[];
+  description?: string | null;
+  isLocked?: boolean;
+  firstSeenOrder?: number | null;
+}
+
+export interface ExtractStoryMemoryPayload {
+  targetLanguage: string;
+  provider: 'gemini' | 'openai' | 'mock';
+  model?: string;
+  startOrder?: number | null;
+  endOrder?: number | null;
+  apiKey?: string;
+}
+
+export interface ExtractStoryMemoryResponse {
+  created: number;
+  updated: number;
+  skippedLocked: number;
+  extractedCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  modelUsed: string;
+  glossary: StoryEntityItem[];
+}
+
+export interface StoryConsistencyIssue {
+  segmentOrder: number;
+  entityId: string;
+  sourceTerm: string;
+  expectedTranslation: string;
+  category: string;
+  matchedSourceTerms: string[];
+}
+
+export interface StoryConsistencyReport {
+  jobId: string;
+  novelId: string;
+  targetLanguage: string;
+  checkedSegments: number;
+  glossaryCount: number;
+  issueCount: number;
+  issues: StoryConsistencyIssue[];
+}
+
+async function readApiError(res: Response, fallback: string): Promise<string> {
+  try {
+    const raw = await res.text();
+    if (!raw) return `${fallback} (${res.status})`;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error;
+    }
+    return raw;
+  } catch {
+    return `${fallback} (${res.status})`;
+  }
+}
+
 export async function checkHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_BASE}/health`);
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
@@ -264,6 +355,110 @@ export async function cancelTranslationJob(id: string): Promise<{ id: string; st
     const err = await res.text().catch(() => 'Failed to cancel translation job');
     throw new Error(err);
   }
+  return res.json();
+}
+
+// Story Memory Endpoints (BASI-004)
+export async function getStoryMemory(
+  novelId: string,
+  opts?: { targetLanguage?: string; category?: string; search?: string }
+): Promise<StoryEntityItem[]> {
+  const params = new URLSearchParams();
+  if (opts?.targetLanguage) params.set('targetLanguage', opts.targetLanguage);
+  if (opts?.category) params.set('category', opts.category);
+  if (opts?.search) params.set('search', opts.search);
+  const qs = params.toString();
+  const url = `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory${qs ? `?${qs}` : ''}`;
+  const res = await fetch(url, { credentials: 'include' });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch story memory'));
+  return res.json();
+}
+
+export async function createStoryEntity(
+  novelId: string,
+  payload: UpsertStoryEntityPayload
+): Promise<StoryEntityItem> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      [headerName]: token,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to create story entity'));
+  return res.json();
+}
+
+export async function updateStoryEntity(
+  novelId: string,
+  entryId: string,
+  payload: UpsertStoryEntityPayload
+): Promise<StoryEntityItem> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(
+    `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`,
+    {
+      method: 'PUT',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        [headerName]: token,
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to update story entity'));
+  return res.json();
+}
+
+export async function deleteStoryEntity(
+  novelId: string,
+  entryId: string
+): Promise<{ deleted: boolean; id: string }> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(
+    `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`,
+    {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: {
+        [headerName]: token,
+      },
+    }
+  );
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to delete story entity'));
+  return res.json();
+}
+
+export async function extractStoryMemory(
+  novelId: string,
+  payload: ExtractStoryMemoryPayload
+): Promise<ExtractStoryMemoryResponse> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/extract`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      [headerName]: token,
+    },
+    body: JSON.stringify({
+      ...payload,
+      apiKey: payload.apiKey || undefined,
+    }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to extract story memory'));
+  return res.json();
+}
+
+export async function getJobConsistency(jobId: string): Promise<StoryConsistencyReport> {
+  const res = await fetch(`${API_BASE}/translations/${encodeURIComponent(jobId)}/consistency`, {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to check consistency'));
   return res.json();
 }
 

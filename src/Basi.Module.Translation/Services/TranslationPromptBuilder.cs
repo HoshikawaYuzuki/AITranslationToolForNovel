@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using Basi.Core.Models;
 
 namespace Basi.Module.Translation.Services;
 
@@ -13,7 +14,8 @@ public interface ITranslationPromptBuilder
         string sourceLanguage,
         string targetLanguage,
         IReadOnlyList<SegmentItem> segmentsToTranslate,
-        IReadOnlyList<ContextSegmentItem>? contextHistory = null);
+        IReadOnlyList<ContextSegmentItem>? contextHistory = null,
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null);
 
     IReadOnlyDictionary<int, string> ParseResponse(string content, IEnumerable<int> expectedOrders);
 }
@@ -24,7 +26,8 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         string sourceLanguage,
         string targetLanguage,
         IReadOnlyList<SegmentItem> segmentsToTranslate,
-        IReadOnlyList<ContextSegmentItem>? contextHistory = null)
+        IReadOnlyList<ContextSegmentItem>? contextHistory = null,
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceLanguage);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetLanguage);
@@ -42,6 +45,49 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
             $"- Do NOT include any conversational filler, notes, greetings, or explanations outside the [SEG:X] blocks.";
 
         var sb = new StringBuilder();
+
+        // Include curated/extracted glossary terms before target segments so terminology stays consistent
+        if (glossaryTerms != null && glossaryTerms.Count > 0)
+        {
+            var glossaryLines = new List<string>();
+            foreach (var term in glossaryTerms)
+            {
+                var src = SanitizeGlossaryField(term.SourceTerm);
+                var tgt = SanitizeGlossaryField(term.TranslatedTerm);
+                if (string.IsNullOrWhiteSpace(src) || string.IsNullOrWhiteSpace(tgt)) continue;
+
+                var line = new StringBuilder();
+                line.Append($"- {src} -> {tgt}");
+                var cat = SanitizeGlossaryField(term.Category);
+                if (!string.IsNullOrWhiteSpace(cat)) line.Append($" [{cat}]");
+                if (term.Aliases is { Count: > 0 })
+                {
+                    var cleanAliases = term.Aliases
+                        .Select(SanitizeGlossaryField)
+                        .Where(a => !string.IsNullOrWhiteSpace(a))
+                        .ToList();
+                    if (cleanAliases.Count > 0)
+                    {
+                        line.Append($" (Aliases: {string.Join(", ", cleanAliases)})");
+                    }
+                }
+                if (!string.IsNullOrWhiteSpace(term.Description))
+                {
+                    line.Append($" | Note: {SanitizeGlossaryField(term.Description)}");
+                }
+                glossaryLines.Add(line.ToString());
+            }
+
+            if (glossaryLines.Count > 0)
+            {
+                sb.AppendLine("--- STORY MEMORY & GLOSSARY (USE THESE CANONICAL TRANSLATIONS CONSISTENTLY) ---");
+                foreach (var gLine in glossaryLines)
+                {
+                    sb.AppendLine(gLine);
+                }
+                sb.AppendLine();
+            }
+        }
 
         // Include preceding context window if available to maintain narrative continuity
         if (contextHistory != null && contextHistory.Count > 0)
@@ -136,4 +182,17 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
 
     [GeneratedRegex(@"\[SEG:(\d+)\]\s*([\s\S]*?)(?=(?:\[SEG:\d+\])|\z)")]
     private static partial Regex SegmentTagRegex();
+
+    [GeneratedRegex(@"\[SEG:", RegexOptions.IgnoreCase)]
+    private static partial Regex GlossarySegmentMarkerRegex();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex MultiWhitespaceRegex();
+
+    private static string SanitizeGlossaryField(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var flattened = MultiWhitespaceRegex().Replace(value.Trim(), " ");
+        return GlossarySegmentMarkerRegex().Replace(flattened, "[SEG_");
+    }
 }

@@ -1,8 +1,11 @@
+using System.Text.Json;
 using Basi.Core.Models;
 using Basi.Module.Identity.Models;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Basi.Api.Data;
 
@@ -16,6 +19,7 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
     public DbSet<Segment> Segments => Set<Segment>();
     public DbSet<TranslationJob> TranslationJobs => Set<TranslationJob>();
     public DbSet<TranslatedSegment> TranslatedSegments => Set<TranslatedSegment>();
+    public DbSet<StoryEntity> StoryEntities => Set<StoryEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -97,6 +101,45 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
             b.HasOne(ts => ts.Segment)
              .WithMany()
              .HasForeignKey(ts => ts.SegmentId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- StoryEntity (BASI-004: ADR-002 JSONB Aliases + Per-Owner Scoping) ----
+        var stringListConverter = new ValueConverter<List<string>, string>(
+            v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+            v => string.IsNullOrWhiteSpace(v)
+                ? new List<string>()
+                : JsonSerializer.Deserialize<List<string>>(v, (JsonSerializerOptions?)null) ?? new List<string>());
+
+        var stringListComparer = new ValueComparer<List<string>>(
+            (c1, c2) => (c1 ?? new List<string>()).SequenceEqual(c2 ?? new List<string>(), StringComparer.Ordinal),
+            c => c.Aggregate(0, (acc, item) => HashCode.Combine(acc, StringComparer.Ordinal.GetHashCode(item))),
+            c => c.ToList());
+
+        modelBuilder.Entity<StoryEntity>(b =>
+        {
+            b.HasKey(e => e.Id);
+            b.Property(e => e.TargetLanguage).HasMaxLength(32).IsRequired();
+            b.Property(e => e.SourceTerm).HasMaxLength(256).IsRequired();
+            b.Property(e => e.NormalizedSourceTerm).HasMaxLength(256).IsRequired();
+            b.Property(e => e.TranslatedTerm).HasMaxLength(256).IsRequired();
+            b.Property(e => e.Category).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(e => e.Origin).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(e => e.Description).HasMaxLength(1000);
+            b.Property(e => e.Aliases)
+             .HasConversion(stringListConverter, stringListComparer)
+             .HasColumnType("jsonb");
+            b.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            b.Property(e => e.UpdatedAt).HasDefaultValueSql("now()");
+            b.HasIndex(e => new { e.NovelId, e.TargetLanguage, e.NormalizedSourceTerm }).IsUnique();
+            b.HasIndex(e => e.OwnerId);
+            b.HasOne<ApplicationUser>()
+             .WithMany()
+             .HasForeignKey(e => e.OwnerId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(e => e.Novel)
+             .WithMany(n => n.StoryEntities)
+             .HasForeignKey(e => e.NovelId)
              .OnDelete(DeleteBehavior.Cascade);
         });
     }

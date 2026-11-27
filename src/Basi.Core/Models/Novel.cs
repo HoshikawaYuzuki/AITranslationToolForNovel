@@ -18,4 +18,6 @@ public sealed class Novel
     public DateTime UploadedAt { get; init; } = DateTime.UtcNow;
 
     public ICollection<Segment> Segments { get; init; } = new List<Segment>();
+
+    public ICollection<StoryEntity> StoryEntities { get; init; } = new List<StoryEntity>();
 }

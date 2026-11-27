@@ -37,7 +37,8 @@ public interface ITranslationEngine
         IReadOnlyList<SegmentItem> batch,
         IReadOnlyList<ContextSegmentItem>? context = null,
         CancellationToken ct = default,
-        int? maxOutputTokens = null);
+        int? maxOutputTokens = null,
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null);
 }
 
 public sealed class TranslationEngine : ITranslationEngine
@@ -57,7 +58,8 @@ public sealed class TranslationEngine : ITranslationEngine
         IReadOnlyList<SegmentItem> batch,
         IReadOnlyList<ContextSegmentItem>? context = null,
         CancellationToken ct = default,
-        int? maxOutputTokens = null)
+        int? maxOutputTokens = null,
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(batch);
@@ -71,7 +73,7 @@ public sealed class TranslationEngine : ITranslationEngine
                 model);
         }
 
-        var prompt = _promptBuilder.BuildPrompt(sourceLanguage, targetLanguage, batch, context);
+        var prompt = _promptBuilder.BuildPrompt(sourceLanguage, targetLanguage, batch, context, glossaryTerms);
 
         var request = new AiRequest(
             Model: model,
