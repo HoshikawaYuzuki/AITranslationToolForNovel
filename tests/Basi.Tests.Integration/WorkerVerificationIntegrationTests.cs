@@ -396,9 +396,11 @@ public class WorkerVerificationIntegrationTests
         using var factory = new ControlledWorkerTestFactory { EnableTestAuth = true, DisableBackgroundWorker = true };
 
         var providerCalls = 0;
+        int? capturedMaxTokens = null;
         factory.ProviderSelector = (_, _) => new DelegateAiProvider((req, _) =>
         {
             Interlocked.Increment(ref providerCalls);
+            capturedMaxTokens = req.MaxTokens;
             return Task.FromResult(new AiResponse(
                 BuildMockSegmentedResponse(req.UserPrompt, "Batch1Paid"),
                 PromptTokens: 600,
@@ -460,6 +462,8 @@ public class WorkerVerificationIntegrationTests
         var processed = await worker.ProcessNextJobAsync(CancellationToken.None);
         Assert.True(processed);
         Assert.Equal(1, providerCalls);
+        Assert.NotNull(capturedMaxTokens);
+        Assert.InRange(capturedMaxTokens!.Value, 1, 600); // Output tokens capped by remaining budget (100_000 - 99_400 - input est) < 4096
 
         using (var scope = factory.Services.CreateScope())
         {
@@ -880,6 +884,115 @@ public class WorkerVerificationIntegrationTests
                 Assert.Contains("[Worker2_FRESH]", s.TranslatedText);
                 Assert.DoesNotContain("[Worker1_STALE]", s.TranslatedText);
             });
+        }
+    }
+
+    [Fact]
+    public async Task TokenBudget_InFlightDeadlineExceeded_AbortsSlowProviderAndPreservesCheckpoints()
+    {
+        // F07: Verify active processing deadline passes linked CancellationToken to provider,
+        // aborts a stalled in-flight call mid-request, and preserves prior completed checkpoints.
+        using var factory = new ControlledWorkerTestFactory { EnableTestAuth = true, DisableBackgroundWorker = true };
+
+        var callCount = 0;
+        var providerObservedDeadlineCancel = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        factory.ProviderSelector = (_, _) => new DelegateAiProvider(async (req, ct) =>
+        {
+            if (Interlocked.Increment(ref callCount) == 1)
+            {
+                return new AiResponse(
+                    BuildMockSegmentedResponse(req.UserPrompt, "Batch1BeforeDeadline"),
+                    PromptTokens: 50, CompletionTokens: 50, TotalTokens: 100,
+                    ModelUsed: req.Model, FinishReason: FinishReason.Stop);
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                throw new InvalidOperationException("Slow provider should have been aborted by deadline token");
+            }
+            catch (OperationCanceledException)
+            {
+                providerObservedDeadlineCancel.TrySetResult(true);
+                throw;
+            }
+        });
+
+        var (novelId, ownerId, _, _) = await SeedNovelAsync(factory, segmentCount: 10);
+
+        Guid jobId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var segs = await db.Segments.Where(s => s.NovelId == novelId).OrderBy(s => s.Order).ToListAsync();
+
+            var job = new TranslationJob
+            {
+                NovelId = novelId,
+                OwnerId = ownerId,
+                Provider = "mock",
+                Model = "mock-v1",
+                TargetLanguage = "vi",
+                Status = JobStatus.Queued,
+                TotalSegments = 10,
+                CompletedSegments = 0,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            db.TranslationJobs.Add(job);
+
+            foreach (var s in segs)
+            {
+                db.TranslatedSegments.Add(new TranslatedSegment
+                {
+                    JobId = job.Id,
+                    SegmentId = s.Id,
+                    Order = s.Order,
+                    SourceText = s.Content,
+                    Status = SegmentStatus.Pending
+                });
+            }
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var worker = new TranslationQueueWorker(
+            factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            factory.Services.GetRequiredService<ILogger<TranslationQueueWorker>>(),
+            factory.Services.GetRequiredService<IJobCancellationRegistry>(),
+            "deadline-worker");
+
+        TranslationQueueWorker.RunDurationOverrideForTesting = TimeSpan.FromMilliseconds(250);
+        try
+        {
+            var processed = await worker.ProcessNextJobAsync(CancellationToken.None);
+            Assert.True(processed);
+            Assert.True(await providerObservedDeadlineCancel.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            TranslationQueueWorker.RunDurationOverrideForTesting = null;
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var job = await db.TranslationJobs.AsNoTracking().FirstAsync(j => j.Id == jobId);
+            Assert.Equal(JobStatus.Failed, job.Status);
+            Assert.Contains("time budget", job.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(5, job.CompletedSegments);
+
+            var segs = await db.TranslatedSegments.AsNoTracking().Where(s => s.JobId == jobId).OrderBy(s => s.Order).ToListAsync();
+            for (var i = 0; i < 5; i++)
+            {
+                Assert.Equal(SegmentStatus.Completed, segs[i].Status);
+                Assert.Contains("[Batch1BeforeDeadline]", segs[i].TranslatedText);
+            }
+            for (var i = 5; i < 10; i++)
+            {
+                Assert.Equal(SegmentStatus.Pending, segs[i].Status);
+            }
         }
     }
 }

@@ -36,7 +36,8 @@ public interface ITranslationEngine
         string targetLanguage,
         IReadOnlyList<SegmentItem> batch,
         IReadOnlyList<ContextSegmentItem>? context = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        int? maxOutputTokens = null);
 }
 
 public sealed class TranslationEngine : ITranslationEngine
@@ -55,7 +56,8 @@ public sealed class TranslationEngine : ITranslationEngine
         string targetLanguage,
         IReadOnlyList<SegmentItem> batch,
         IReadOnlyList<ContextSegmentItem>? context = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int? maxOutputTokens = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(batch);
@@ -75,7 +77,7 @@ public sealed class TranslationEngine : ITranslationEngine
             Model: model,
             SystemPrompt: prompt.SystemPrompt,
             UserPrompt: prompt.UserPrompt,
-            MaxTokens: 4096,
+            MaxTokens: Math.Clamp(maxOutputTokens ?? 4096, 1, 4096),
             Temperature: 0.7
         );
 

@@ -24,6 +24,7 @@ public sealed class TranslationQueueWorker : BackgroundService
     internal static void ClearActiveClaims() => _activeJobClaims.Clear();
     internal static int ActiveClaimCount => _activeJobClaims.Count;
     internal static Func<Guid, Task>? OnBeforeFinallyStatusQueryForTesting { get; set; }
+    internal static TimeSpan? RunDurationOverrideForTesting { get; set; }
 
     internal const int MaxBatchSize = 5;
     internal const int MaxBatchChars = 3000;
@@ -54,12 +55,17 @@ public sealed class TranslationQueueWorker : BackgroundService
         _workerInstanceId = string.IsNullOrWhiteSpace(workerInstanceId) ? "default" : workerInstanceId;
     }
 
-    internal static int EstimatePreflightBatchTokens(int batchChars, int batchCount, int contextChars, int contextCount)
+    internal static int EstimatePreflightInputTokens(int batchChars, int batchCount, int contextChars, int contextCount)
     {
         const int systemPromptTokens = 160;
-        var inputTokens = systemPromptTokens
+        return systemPromptTokens
             + (batchChars / 3) + (batchCount * 8)
             + (contextChars / 3) + (contextCount * 8);
+    }
+
+    internal static int EstimatePreflightBatchTokens(int batchChars, int batchCount, int contextChars, int contextCount)
+    {
+        var inputTokens = EstimatePreflightInputTokens(batchChars, batchCount, contextChars, contextCount);
         var expectedOutputTokens = Math.Max(150, (batchChars / 2) + (batchCount * 8));
         return inputTokens + expectedOutputTokens;
     }
@@ -190,16 +196,19 @@ public sealed class TranslationQueueWorker : BackgroundService
 
                 var sourceLanguage = job.Novel?.SourceLanguage ?? "ja";
 
-                // 3. Process segments in bounded batches (by size, char count, token budget, request budget, and run time)
+                var effectiveRunDuration = RunDurationOverrideForTesting ?? MaxJobRunDuration;
+
+                // 3. Process segments in bounded batches (by size, char count, token budget, request budget, and active run deadline)
                 var segmentIndex = 0;
                 while (segmentIndex < pendingSegments.Count)
                 {
                     if (ct.IsCancellationRequested || jobCts.IsCancellationRequested) break;
 
-                    if (runStopwatch.Elapsed >= MaxJobRunDuration)
+                    var remainingRunTime = effectiveRunDuration - runStopwatch.Elapsed;
+                    if (remainingRunTime <= TimeSpan.Zero)
                     {
-                        _logger.LogWarning("Job {JobId} exceeded maximum processing time limit ({Duration}). Halting further batches.", job.Id, MaxJobRunDuration);
-                        await TryFencedFailJobAsync(db, job.Id, currentLease, $"Job exceeded maximum processing time budget of {MaxJobRunDuration.TotalMinutes:0} minutes.", apiKeyVault, ct);
+                        _logger.LogWarning("Job {JobId} exceeded active processing time limit ({Duration}). Halting further batches.", job.Id, effectiveRunDuration);
+                        await TryFencedFailJobAsync(db, job.Id, currentLease, $"Job exceeded maximum processing time budget of {effectiveRunDuration.TotalMinutes:0.##} minutes.", apiKeyVault, ct);
                         return true;
                     }
 
@@ -310,11 +319,12 @@ public sealed class TranslationQueueWorker : BackgroundService
                     }
                     contextHistory.Reverse();
 
-                    // F07: Preflight token budget check BEFORE dispatching provider request
+                    // F07: Preflight token budget check & output cap BEFORE dispatching provider request
+                    var remainingBudget = Math.Max(0, MaxJobTotalTokens - currentTotalTokens);
+                    var estimatedInputTokens = EstimatePreflightInputTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count);
                     var estimatedBatchTokens = EstimatePreflightBatchTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count);
                     if (currentTotalTokens + estimatedBatchTokens > MaxJobTotalTokens)
                     {
-                        var remainingBudget = Math.Max(0, MaxJobTotalTokens - currentTotalTokens);
                         _logger.LogWarning(
                             "Job {JobId} stopped by preflight token budget check: estimated batch tokens ({Estimated}) exceed remaining budget ({Remaining} of {Budget}).",
                             job.Id, estimatedBatchTokens, remainingBudget, MaxJobTotalTokens);
@@ -327,6 +337,16 @@ public sealed class TranslationQueueWorker : BackgroundService
                             ct);
                         return true;
                     }
+
+                    var remainingRunTimeForCall = effectiveRunDuration - runStopwatch.Elapsed;
+                    if (remainingRunTimeForCall <= TimeSpan.Zero)
+                    {
+                        _logger.LogWarning("Job {JobId} exceeded active processing time limit ({Duration}) before provider dispatch.", job.Id, effectiveRunDuration);
+                        await TryFencedFailJobAsync(db, job.Id, currentLease, $"Job exceeded maximum processing time budget of {effectiveRunDuration.TotalMinutes:0.##} minutes.", apiKeyVault, ct);
+                        return true;
+                    }
+
+                    var maxOutputTokensForRequest = Math.Clamp(remainingBudget - estimatedInputTokens, 1, 4096);
 
                     IAiProvider provider;
                     try
@@ -354,6 +374,9 @@ public sealed class TranslationQueueWorker : BackgroundService
 
                     var batchItems = batch.Select(b => new SegmentItem(b.Order, b.SourceText)).ToList();
 
+                    using var deadlineCts = CancellationTokenSource.CreateLinkedTokenSource(jobCts.Token);
+                    deadlineCts.CancelAfter(remainingRunTimeForCall);
+
                     try
                     {
                         var batchResult = await translationEngine.TranslateBatchAsync(
@@ -363,7 +386,8 @@ public sealed class TranslationQueueWorker : BackgroundService
                             job.TargetLanguage,
                             batchItems,
                             contextHistory,
-                            jobCts.Token);
+                            deadlineCts.Token,
+                            maxOutputTokensForRequest);
 
                         var commitLease = NextLeaseTimestamp(currentLease);
                         var nextActualModel = !string.IsNullOrWhiteSpace(batchResult.ModelUsed) ? batchResult.ModelUsed : currentActualModel;
@@ -402,10 +426,32 @@ public sealed class TranslationQueueWorker : BackgroundService
                     {
                         throw; // Handled uniformly by outer job-cancellation catch
                     }
+                    catch (OperationCanceledException) when (deadlineCts.IsCancellationRequested && !jobCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                    {
+                        _logger.LogWarning("Job {JobId} active processing deadline elapsed during in-flight provider request.", job.Id);
+                        await RevertTranslatingBatchAndSetStatusAsync(
+                            db,
+                            job.Id,
+                            currentLease,
+                            batch,
+                            JobStatus.Failed,
+                            $"Job exceeded maximum processing time budget of {effectiveRunDuration.TotalMinutes:0.##} minutes.",
+                            ct);
+                        apiKeyVault.RemoveJobKey(job.Id);
+                        currentBatch = null;
+                        return true;
+                    }
                     catch (AiProviderError ex) when (ex.ErrorCode == AiErrorCode.InvalidApiKey)
                     {
                         _logger.LogWarning("Job {JobId} paused during processing: API key missing/invalid.", job.Id);
-                        await RevertTranslatingBatchAndPauseAsync(db, job.Id, currentLease, batch, ct);
+                        await RevertTranslatingBatchAndSetStatusAsync(
+                            db,
+                            job.Id,
+                            currentLease,
+                            batch,
+                            JobStatus.WaitingForApiKey,
+                            "API key is missing or invalid. Please provide a valid API key to resume.",
+                            ct);
                         currentBatch = null;
                         return true;
                     }
@@ -813,11 +859,13 @@ public sealed class TranslationQueueWorker : BackgroundService
         }
     }
 
-    private async Task RevertTranslatingBatchAndPauseAsync(
+    private async Task RevertTranslatingBatchAndSetStatusAsync(
         BasiDbContext db,
         Guid jobId,
         DateTime currentLease,
         IReadOnlyList<TranslatedSegment> batch,
+        JobStatus targetStatus,
+        string errorMessage,
         CancellationToken ct)
     {
         var nextLease = NextLeaseTimestamp(currentLease);
@@ -827,8 +875,8 @@ public sealed class TranslationQueueWorker : BackgroundService
             var rows = await db.TranslationJobs
                 .Where(j => j.Id == jobId && j.Status == JobStatus.Processing && j.UpdatedAt == currentLease)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(j => j.Status, JobStatus.WaitingForApiKey)
-                    .SetProperty(j => j.ErrorMessage, "API key is missing or invalid. Please provide a valid API key to resume.")
+                    .SetProperty(j => j.Status, targetStatus)
+                    .SetProperty(j => j.ErrorMessage, errorMessage)
                     .SetProperty(j => j.UpdatedAt, nextLease), ct);
 
             if (rows == 0)
@@ -860,8 +908,8 @@ public sealed class TranslationQueueWorker : BackgroundService
             return;
         }
 
-        entity.Status = JobStatus.WaitingForApiKey;
-        entity.ErrorMessage = "API key is missing or invalid. Please provide a valid API key to resume.";
+        entity.Status = targetStatus;
+        entity.ErrorMessage = errorMessage;
         entity.UpdatedAt = nextLease;
         await fenceDb.SaveChangesAsync(ct);
 
