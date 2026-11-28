@@ -57,6 +57,102 @@ namespace Basi.Api.Migrations
                     b.ToTable("Novels");
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.SceneFact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ConflictDetails")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("EvidenceQuote")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("EvidenceSegmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("EvidenceSegmentOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("EvidenceSegmentStableId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("FactKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("FactType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("NormalizedFactKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid>("NovelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("TargetLanguage")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EvidenceSegmentId");
+
+                    b.HasIndex("OwnerId");
+
+                    b.HasIndex("NovelId", "TargetLanguage", "NormalizedFactKey")
+                        .IsUnique();
+
+                    b.ToTable("SceneFacts");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.Segment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -88,6 +184,115 @@ namespace Basi.Api.Migrations
                     b.ToTable("Segments");
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.SpeechObservation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AddresseeName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("ConflictDetails")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("EvidenceQuote")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("EvidenceSegmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("EvidenceSegmentOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("EvidenceSegmentStableId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("NormalizedAddresseeName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedSpeakerName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid>("NovelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Observation")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PronounStyle")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("SpeakerName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("SpeechRegister")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TargetLanguage")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EvidenceSegmentId");
+
+                    b.HasIndex("OwnerId");
+
+                    b.HasIndex("NovelId", "TargetLanguage", "NormalizedSpeakerName", "NormalizedAddresseeName")
+                        .IsUnique();
+
+                    b.ToTable("SpeechObservations");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.StoryEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -103,6 +308,10 @@ namespace Basi.Api.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<string>("ConflictDetails")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -112,8 +321,19 @@ namespace Basi.Api.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
-                    b.Property<int?>("FirstSeenOrder")
+                    b.Property<string>("EvidenceQuote")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("EvidenceSegmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("EvidenceSegmentOrder")
                         .HasColumnType("integer");
+
+                    b.Property<string>("EvidenceSegmentStableId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<bool>("IsLocked")
                         .HasColumnType("boolean");
@@ -139,6 +359,11 @@ namespace Basi.Api.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("TargetLanguage")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -154,7 +379,15 @@ namespace Basi.Api.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
                     b.HasKey("Id");
+
+                    b.HasIndex("EvidenceSegmentId");
 
                     b.HasIndex("OwnerId");
 
@@ -508,6 +741,30 @@ namespace Basi.Api.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.SceneFact", b =>
+                {
+                    b.HasOne("Basi.Core.Models.Segment", "EvidenceSegment")
+                        .WithMany()
+                        .HasForeignKey("EvidenceSegmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Basi.Core.Models.Novel", "Novel")
+                        .WithMany("SceneFacts")
+                        .HasForeignKey("NovelId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Basi.Module.Identity.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("EvidenceSegment");
+
+                    b.Navigation("Novel");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.Segment", b =>
                 {
                     b.HasOne("Basi.Core.Models.Novel", "Novel")
@@ -519,8 +776,37 @@ namespace Basi.Api.Migrations
                     b.Navigation("Novel");
                 });
 
+            modelBuilder.Entity("Basi.Core.Models.SpeechObservation", b =>
+                {
+                    b.HasOne("Basi.Core.Models.Segment", "EvidenceSegment")
+                        .WithMany()
+                        .HasForeignKey("EvidenceSegmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Basi.Core.Models.Novel", "Novel")
+                        .WithMany("SpeechObservations")
+                        .HasForeignKey("NovelId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Basi.Module.Identity.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("EvidenceSegment");
+
+                    b.Navigation("Novel");
+                });
+
             modelBuilder.Entity("Basi.Core.Models.StoryEntity", b =>
                 {
+                    b.HasOne("Basi.Core.Models.Segment", "EvidenceSegment")
+                        .WithMany()
+                        .HasForeignKey("EvidenceSegmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("Basi.Core.Models.Novel", "Novel")
                         .WithMany("StoryEntities")
                         .HasForeignKey("NovelId")
@@ -532,6 +818,8 @@ namespace Basi.Api.Migrations
                         .HasForeignKey("OwnerId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("EvidenceSegment");
 
                     b.Navigation("Novel");
                 });
@@ -625,7 +913,11 @@ namespace Basi.Api.Migrations
 
             modelBuilder.Entity("Basi.Core.Models.Novel", b =>
                 {
+                    b.Navigation("SceneFacts");
+
                     b.Navigation("Segments");
+
+                    b.Navigation("SpeechObservations");
 
                     b.Navigation("StoryEntities");
                 });

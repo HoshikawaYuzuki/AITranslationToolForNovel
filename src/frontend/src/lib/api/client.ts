@@ -87,6 +87,10 @@ export type StoryEntityCategory =
   | 'Honorific'
   | 'Other';
 
+export type FactStatus = 'Unknown' | 'Provisional' | 'Confirmed' | 'Conflicted';
+
+export type SceneFactType = 'Setting' | 'Time' | 'PresentCharacters' | 'EventState' | 'Other';
+
 export interface StoryEntityItem {
   id: string;
   novelId: string;
@@ -97,8 +101,14 @@ export interface StoryEntityItem {
   aliases: string[];
   description?: string | null;
   origin: 'Manual' | 'AiExtracted';
+  status: FactStatus;
+  conflictDetails?: string | null;
   isLocked: boolean;
-  firstSeenOrder?: number | null;
+  evidenceSegmentId?: string | null;
+  evidenceSegmentStableId?: string | null;
+  evidenceSegmentOrder?: number | null;
+  evidenceQuote?: string | null;
+  version: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,7 +121,80 @@ export interface UpsertStoryEntityPayload {
   aliases?: string[];
   description?: string | null;
   isLocked?: boolean;
-  firstSeenOrder?: number | null;
+  status?: FactStatus;
+  evidenceSegmentId?: string | null;
+  evidenceQuote?: string | null;
+  conflictDetails?: string | null;
+  expectedVersion?: number | null;
+  clearEvidence?: boolean;
+}
+
+export interface SceneFactItem {
+  id: string;
+  novelId: string;
+  targetLanguage: string;
+  factKey: string;
+  factType: SceneFactType;
+  summary: string;
+  origin: 'Manual' | 'AiExtracted';
+  status: FactStatus;
+  conflictDetails?: string | null;
+  isLocked: boolean;
+  evidenceSegmentId?: string | null;
+  evidenceSegmentStableId?: string | null;
+  evidenceSegmentOrder?: number | null;
+  evidenceQuote?: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertSceneFactPayload {
+  targetLanguage: string;
+  factKey: string;
+  summary: string;
+  factType?: SceneFactType;
+  isLocked?: boolean;
+  status?: FactStatus;
+  evidenceSegmentId?: string | null;
+  evidenceQuote?: string | null;
+  expectedVersion?: number | null;
+}
+
+export interface SpeechObservationItem {
+  id: string;
+  novelId: string;
+  targetLanguage: string;
+  speakerName: string;
+  addresseeName?: string | null;
+  speechRegister: string;
+  pronounStyle?: string | null;
+  observation: string;
+  origin: 'Manual' | 'AiExtracted';
+  status: FactStatus;
+  conflictDetails?: string | null;
+  isLocked: boolean;
+  evidenceSegmentId?: string | null;
+  evidenceSegmentStableId?: string | null;
+  evidenceSegmentOrder?: number | null;
+  evidenceQuote?: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertSpeechObservationPayload {
+  targetLanguage: string;
+  speakerName: string;
+  speechRegister: string;
+  observation: string;
+  addresseeName?: string | null;
+  pronounStyle?: string | null;
+  isLocked?: boolean;
+  status?: FactStatus;
+  evidenceSegmentId?: string | null;
+  evidenceQuote?: string | null;
+  expectedVersion?: number | null;
 }
 
 export interface ExtractStoryMemoryPayload {
@@ -127,12 +210,15 @@ export interface ExtractStoryMemoryResponse {
   created: number;
   updated: number;
   skippedLocked: number;
+  conflicted: number;
   extractedCount: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   modelUsed: string;
   glossary: StoryEntityItem[];
+  sceneFacts: SceneFactItem[];
+  speechObservations: SpeechObservationItem[];
 }
 
 export interface StoryConsistencyIssue {
@@ -359,13 +445,35 @@ export async function cancelTranslationJob(id: string): Promise<{ id: string; st
 }
 
 // Story Memory Endpoints (BASI-004)
+async function sendStoryMutation<T>(
+  path: string,
+  method: 'POST' | 'PUT' | 'DELETE',
+  fallbackError: string,
+  body?: unknown
+): Promise<T> {
+  const { token, headerName } = await getAntiforgeryToken();
+  const headers: Record<string, string> = { [headerName]: token };
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    credentials: 'include',
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(await readApiError(res, fallbackError));
+  return res.json();
+}
+
 export async function getStoryMemory(
   novelId: string,
-  opts?: { targetLanguage?: string; category?: string; search?: string }
+  opts?: { targetLanguage?: string; category?: string; status?: string; search?: string }
 ): Promise<StoryEntityItem[]> {
   const params = new URLSearchParams();
   if (opts?.targetLanguage) params.set('targetLanguage', opts.targetLanguage);
   if (opts?.category) params.set('category', opts.category);
+  if (opts?.status) params.set('status', opts.status);
   if (opts?.search) params.set('search', opts.search);
   const qs = params.toString();
   const url = `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory${qs ? `?${qs}` : ''}`;
@@ -374,85 +482,54 @@ export async function getStoryMemory(
   return res.json();
 }
 
-export async function createStoryEntity(
-  novelId: string,
-  payload: UpsertStoryEntityPayload
-): Promise<StoryEntityItem> {
-  const { token, headerName } = await getAntiforgeryToken();
-  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      [headerName]: token,
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(await readApiError(res, 'Failed to create story entity'));
+export const createStoryEntity = (novelId: string, payload: UpsertStoryEntityPayload) =>
+  sendStoryMutation<StoryEntityItem>(`/novels/${encodeURIComponent(novelId)}/story-memory`, 'POST', 'Failed to create story entity', payload);
+
+export const updateStoryEntity = (novelId: string, entryId: string, payload: UpsertStoryEntityPayload) =>
+  sendStoryMutation<StoryEntityItem>(`/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`, 'PUT', 'Failed to update story entity', payload);
+
+export const deleteStoryEntity = (novelId: string, entryId: string) =>
+  sendStoryMutation<{ deleted: boolean; id: string }>(`/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`, 'DELETE', 'Failed to delete story entity');
+
+export async function getSceneFacts(novelId: string, targetLanguage?: string): Promise<SceneFactItem[]> {
+  const qs = targetLanguage ? `?targetLanguage=${encodeURIComponent(targetLanguage)}` : '';
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/scene-facts${qs}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch scene facts'));
   return res.json();
 }
 
-export async function updateStoryEntity(
-  novelId: string,
-  entryId: string,
-  payload: UpsertStoryEntityPayload
-): Promise<StoryEntityItem> {
-  const { token, headerName } = await getAntiforgeryToken();
-  const res = await fetch(
-    `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`,
-    {
-      method: 'PUT',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        [headerName]: token,
-      },
-      body: JSON.stringify(payload),
-    }
+export const createSceneFact = (novelId: string, payload: UpsertSceneFactPayload) =>
+  sendStoryMutation<SceneFactItem>(`/novels/${encodeURIComponent(novelId)}/scene-facts`, 'POST', 'Failed to create scene fact', payload);
+
+export const updateSceneFact = (novelId: string, factId: string, payload: UpsertSceneFactPayload) =>
+  sendStoryMutation<SceneFactItem>(`/novels/${encodeURIComponent(novelId)}/scene-facts/${encodeURIComponent(factId)}`, 'PUT', 'Failed to update scene fact', payload);
+
+export const deleteSceneFact = (novelId: string, factId: string) =>
+  sendStoryMutation<{ deleted: boolean; id: string }>(`/novels/${encodeURIComponent(novelId)}/scene-facts/${encodeURIComponent(factId)}`, 'DELETE', 'Failed to delete scene fact');
+
+export async function getSpeechObservations(novelId: string, targetLanguage?: string): Promise<SpeechObservationItem[]> {
+  const qs = targetLanguage ? `?targetLanguage=${encodeURIComponent(targetLanguage)}` : '';
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/speech-observations${qs}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch speech observations'));
+  return res.json();
+}
+
+export const createSpeechObservation = (novelId: string, payload: UpsertSpeechObservationPayload) =>
+  sendStoryMutation<SpeechObservationItem>(`/novels/${encodeURIComponent(novelId)}/speech-observations`, 'POST', 'Failed to create speech observation', payload);
+
+export const updateSpeechObservation = (novelId: string, obsId: string, payload: UpsertSpeechObservationPayload) =>
+  sendStoryMutation<SpeechObservationItem>(`/novels/${encodeURIComponent(novelId)}/speech-observations/${encodeURIComponent(obsId)}`, 'PUT', 'Failed to update speech observation', payload);
+
+export const deleteSpeechObservation = (novelId: string, obsId: string) =>
+  sendStoryMutation<{ deleted: boolean; id: string }>(`/novels/${encodeURIComponent(novelId)}/speech-observations/${encodeURIComponent(obsId)}`, 'DELETE', 'Failed to delete speech observation');
+
+export const extractStoryMemory = (novelId: string, payload: ExtractStoryMemoryPayload) =>
+  sendStoryMutation<ExtractStoryMemoryResponse>(
+    `/novels/${encodeURIComponent(novelId)}/story-memory/extract`,
+    'POST',
+    'Failed to extract story memory',
+    { ...payload, apiKey: payload.apiKey || undefined }
   );
-  if (!res.ok) throw new Error(await readApiError(res, 'Failed to update story entity'));
-  return res.json();
-}
-
-export async function deleteStoryEntity(
-  novelId: string,
-  entryId: string
-): Promise<{ deleted: boolean; id: string }> {
-  const { token, headerName } = await getAntiforgeryToken();
-  const res = await fetch(
-    `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`,
-    {
-      method: 'DELETE',
-      credentials: 'include',
-      headers: {
-        [headerName]: token,
-      },
-    }
-  );
-  if (!res.ok) throw new Error(await readApiError(res, 'Failed to delete story entity'));
-  return res.json();
-}
-
-export async function extractStoryMemory(
-  novelId: string,
-  payload: ExtractStoryMemoryPayload
-): Promise<ExtractStoryMemoryResponse> {
-  const { token, headerName } = await getAntiforgeryToken();
-  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory/extract`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      [headerName]: token,
-    },
-    body: JSON.stringify({
-      ...payload,
-      apiKey: payload.apiKey || undefined,
-    }),
-  });
-  if (!res.ok) throw new Error(await readApiError(res, 'Failed to extract story memory'));
-  return res.json();
-}
 
 export async function getJobConsistency(jobId: string): Promise<StoryConsistencyReport> {
   const res = await fetch(`${API_BASE}/translations/${encodeURIComponent(jobId)}/consistency`, {

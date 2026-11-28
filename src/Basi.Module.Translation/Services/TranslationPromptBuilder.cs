@@ -15,7 +15,9 @@ public interface ITranslationPromptBuilder
         string targetLanguage,
         IReadOnlyList<SegmentItem> segmentsToTranslate,
         IReadOnlyList<ContextSegmentItem>? contextHistory = null,
-        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null);
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null,
+        IReadOnlyList<SceneFactContextItem>? sceneFacts = null,
+        IReadOnlyList<SpeechObservationContextItem>? speechObservations = null);
 
     IReadOnlyDictionary<int, string> ParseResponse(string content, IEnumerable<int> expectedOrders);
 }
@@ -27,7 +29,9 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
         string targetLanguage,
         IReadOnlyList<SegmentItem> segmentsToTranslate,
         IReadOnlyList<ContextSegmentItem>? contextHistory = null,
-        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null)
+        IReadOnlyList<GlossaryContextItem>? glossaryTerms = null,
+        IReadOnlyList<SceneFactContextItem>? sceneFacts = null,
+        IReadOnlyList<SpeechObservationContextItem>? speechObservations = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceLanguage);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetLanguage);
@@ -84,6 +88,68 @@ public sealed partial class TranslationPromptBuilder : ITranslationPromptBuilder
                 foreach (var gLine in glossaryLines)
                 {
                     sb.AppendLine(gLine);
+                }
+                sb.AppendLine();
+            }
+        }
+
+        if (sceneFacts != null && sceneFacts.Count > 0)
+        {
+            var factLines = new List<string>();
+            foreach (var fact in sceneFacts)
+            {
+                var key = SanitizeGlossaryField(fact.FactKey);
+                var summary = SanitizeGlossaryField(fact.Summary);
+                if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(summary)) continue;
+                var type = SanitizeGlossaryField(fact.FactType);
+                factLines.Add($"- [{type}] {key}: {summary}");
+            }
+
+            if (factLines.Count > 0)
+            {
+                sb.AppendLine("--- SCENE FACTS (CONTINUITY REFERENCE) ---");
+                foreach (var fLine in factLines)
+                {
+                    sb.AppendLine(fLine);
+                }
+                sb.AppendLine();
+            }
+        }
+
+        if (speechObservations != null && speechObservations.Count > 0)
+        {
+            var speechLines = new List<string>();
+            foreach (var obs in speechObservations)
+            {
+                var speaker = SanitizeGlossaryField(obs.SpeakerName);
+                var register = SanitizeGlossaryField(obs.SpeechRegister);
+                var note = SanitizeGlossaryField(obs.Observation);
+                if (string.IsNullOrWhiteSpace(speaker) || string.IsNullOrWhiteSpace(register)) continue;
+
+                var line = new StringBuilder();
+                line.Append($"- {speaker}");
+                if (!string.IsNullOrWhiteSpace(obs.AddresseeName))
+                {
+                    line.Append($" -> {SanitizeGlossaryField(obs.AddresseeName)}");
+                }
+                line.Append($" [{register}]");
+                if (!string.IsNullOrWhiteSpace(obs.PronounStyle))
+                {
+                    line.Append($" (Pronouns: {SanitizeGlossaryField(obs.PronounStyle)})");
+                }
+                if (!string.IsNullOrWhiteSpace(note))
+                {
+                    line.Append($": {note}");
+                }
+                speechLines.Add(line.ToString());
+            }
+
+            if (speechLines.Count > 0)
+            {
+                sb.AppendLine("--- CHARACTER SPEECH & REGISTER OBSERVATIONS ---");
+                foreach (var sLine in speechLines)
+                {
+                    sb.AppendLine(sLine);
                 }
                 sb.AppendLine();
             }

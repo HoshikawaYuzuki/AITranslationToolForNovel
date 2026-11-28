@@ -203,6 +203,14 @@ public sealed class TranslationQueueWorker : BackgroundService
                     .AsNoTracking()
                     .Where(e => e.NovelId == job.NovelId && e.TargetLanguage.ToLower() == job.TargetLanguage.ToLower())
                     .ToListAsync(jobCts.Token);
+                var sceneFacts = await db.SceneFacts
+                    .AsNoTracking()
+                    .Where(f => f.NovelId == job.NovelId && f.TargetLanguage.ToLower() == job.TargetLanguage.ToLower())
+                    .ToListAsync(jobCts.Token);
+                var speechObservations = await db.SpeechObservations
+                    .AsNoTracking()
+                    .Where(o => o.NovelId == job.NovelId && o.TargetLanguage.ToLower() == job.TargetLanguage.ToLower())
+                    .ToListAsync(jobCts.Token);
 
                 var effectiveRunDuration = RunDurationOverrideForTesting ?? MaxJobRunDuration;
 
@@ -327,17 +335,30 @@ public sealed class TranslationQueueWorker : BackgroundService
                     }
                     contextHistory.Reverse();
 
-                    // BASI-004: Select batch-relevant bounded story memory / glossary terms
+                    // BASI-004: Select batch-relevant bounded Story Memory Lite context (Confirmed/Provisional only)
+                    var batchSourceTexts = batch.Select(b => b.SourceText).ToList();
                     var glossaryTerms = storyMemorySelector.SelectForBatch(
                         storyEntities,
-                        batch.Select(b => b.SourceText).ToList(),
+                        batchSourceTexts,
                         contextHistory.Select(c => c.SourceText).ToList());
-                    var glossaryChars = glossaryTerms.Sum(StoryMemorySelector.EstimatePromptLineLength);
+                    var selectedSceneFacts = storyMemorySelector.SelectSceneFactsForBatch(
+                        sceneFacts,
+                        batch.Select(b => b.Order).ToList(),
+                        batchSourceTexts);
+                    var selectedSpeechObs = storyMemorySelector.SelectSpeechObservationsForBatch(
+                        speechObservations,
+                        batchSourceTexts,
+                        glossaryTerms);
+
+                    var storyChars = glossaryTerms.Sum(StoryMemorySelector.EstimatePromptLineLength)
+                        + selectedSceneFacts.Sum(StoryMemorySelector.EstimateSceneFactLineLength)
+                        + selectedSpeechObs.Sum(StoryMemorySelector.EstimateSpeechObservationLineLength);
+                    var storyItemCount = glossaryTerms.Count + selectedSceneFacts.Count + selectedSpeechObs.Count;
 
                     // F07: Preflight token budget check & output cap BEFORE dispatching provider request
                     var remainingBudget = Math.Max(0, MaxJobTotalTokens - currentTotalTokens);
-                    var estimatedInputTokens = EstimatePreflightInputTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, glossaryChars, glossaryTerms.Count);
-                    var estimatedBatchTokens = EstimatePreflightBatchTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, glossaryChars, glossaryTerms.Count);
+                    var estimatedInputTokens = EstimatePreflightInputTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, storyChars, storyItemCount);
+                    var estimatedBatchTokens = EstimatePreflightBatchTokens(accumulatedChars, batch.Count, totalContextChars, contextHistory.Count, storyChars, storyItemCount);
                     if (currentTotalTokens + estimatedBatchTokens > MaxJobTotalTokens)
                     {
                         _logger.LogWarning(
@@ -403,7 +424,9 @@ public sealed class TranslationQueueWorker : BackgroundService
                             contextHistory,
                             deadlineCts.Token,
                             maxOutputTokensForRequest,
-                            glossaryTerms);
+                            glossaryTerms,
+                            selectedSceneFacts,
+                            selectedSpeechObs);
 
                         var commitLease = NextLeaseTimestamp(currentLease);
                         var nextActualModel = !string.IsNullOrWhiteSpace(batchResult.ModelUsed) ? batchResult.ModelUsed : currentActualModel;

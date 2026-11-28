@@ -20,18 +20,36 @@ public interface IStoryMemorySelector
         int maxEntries = StoryMemorySelector.MaxGlossaryEntriesPerBatch,
         int maxChars = StoryMemorySelector.MaxGlossaryCharsPerBatch);
 
+    IReadOnlyList<SceneFactContextItem> SelectSceneFactsForBatch(
+        IReadOnlyList<SceneFact> facts,
+        IReadOnlyList<int> batchOrders,
+        IReadOnlyList<string> batchSourceTexts,
+        int maxEntries = StoryMemorySelector.MaxSceneFactsPerBatch,
+        int maxChars = StoryMemorySelector.MaxStoryNotesCharsPerBatch);
+
+    IReadOnlyList<SpeechObservationContextItem> SelectSpeechObservationsForBatch(
+        IReadOnlyList<SpeechObservation> observations,
+        IReadOnlyList<string> batchSourceTexts,
+        IReadOnlyList<GlossaryContextItem>? matchedGlossary = null,
+        int maxEntries = StoryMemorySelector.MaxSpeechObservationsPerBatch,
+        int maxChars = StoryMemorySelector.MaxStoryNotesCharsPerBatch);
+
     IReadOnlyList<StoryConsistencyIssue> CheckConsistency(
         IReadOnlyList<StoryEntity> entities,
         IEnumerable<(int Order, string SourceText, string? TranslatedText)> completedSegments);
 }
 
 /// <summary>
-/// Selects bounded, batch-relevant glossary entries for translation prompts and checks translated segment consistency.
+/// Selects bounded, batch-relevant glossary entries, scene facts, and speech observations,
+/// preferring Confirmed over Provisional and excluding Unknown/Conflicted items from prompt injection.
 /// </summary>
 public sealed class StoryMemorySelector : IStoryMemorySelector
 {
     public const int MaxGlossaryEntriesPerBatch = 20;
     public const int MaxGlossaryCharsPerBatch = 1500;
+    public const int MaxSceneFactsPerBatch = 6;
+    public const int MaxSpeechObservationsPerBatch = 8;
+    public const int MaxStoryNotesCharsPerBatch = 600;
     private const int MaxBackgroundCharacters = 5;
 
     public IReadOnlyList<GlossaryContextItem> SelectForBatch(
@@ -46,6 +64,14 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
             return Array.Empty<GlossaryContextItem>();
         }
 
+        var eligible = entities
+            .Where(e => e.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .OrderBy(e => e.Status == FactStatus.Confirmed ? 0 : 1)
+            .ThenByDescending(e => e.NormalizedSourceTerm.Length)
+            .ThenBy(e => e.EvidenceSegmentOrder ?? int.MaxValue)
+            .ThenBy(e => e.SourceTerm, StringComparer.Ordinal)
+            .ToList();
+
         var batchCorpus = StoryEntityNormalizer.NormalizeKey(string.Join(" ", batchSourceTexts ?? Array.Empty<string>()));
         var contextCorpus = StoryEntityNormalizer.NormalizeKey(string.Join(" ", contextSourceTexts ?? Array.Empty<string>()));
 
@@ -53,10 +79,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         var contextHits = new List<StoryEntity>();
         var characterFillers = new List<StoryEntity>();
 
-        foreach (var entity in entities
-            .OrderByDescending(e => e.NormalizedSourceTerm.Length)
-            .ThenBy(e => e.FirstSeenOrder ?? int.MaxValue)
-            .ThenBy(e => e.SourceTerm, StringComparer.Ordinal))
+        foreach (var entity in eligible)
         {
             if (MatchesEntity(batchCorpus, entity))
             {
@@ -96,8 +119,118 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         TryAppend(batchHits);
         TryAppend(contextHits);
         TryAppend(
-            characterFillers.OrderBy(e => e.FirstSeenOrder ?? int.MaxValue).ThenBy(e => e.CreatedAt),
+            characterFillers.OrderBy(e => e.EvidenceSegmentOrder ?? int.MaxValue).ThenBy(e => e.CreatedAt),
             MaxBackgroundCharacters);
+
+        return selected;
+    }
+
+    public IReadOnlyList<SceneFactContextItem> SelectSceneFactsForBatch(
+        IReadOnlyList<SceneFact> facts,
+        IReadOnlyList<int> batchOrders,
+        IReadOnlyList<string> batchSourceTexts,
+        int maxEntries = MaxSceneFactsPerBatch,
+        int maxChars = MaxStoryNotesCharsPerBatch)
+    {
+        if (facts == null || facts.Count == 0 || maxEntries <= 0 || maxChars <= 0)
+        {
+            return Array.Empty<SceneFactContextItem>();
+        }
+
+        var maxBatchOrder = batchOrders is { Count: > 0 } ? batchOrders.Max() : int.MaxValue;
+        var batchCorpus = StoryEntityNormalizer.NormalizeKey(string.Join(" ", batchSourceTexts ?? Array.Empty<string>()));
+
+        var ordered = facts
+            .Where(f => f.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Where(f => !f.EvidenceSegmentOrder.HasValue || f.EvidenceSegmentOrder.Value <= maxBatchOrder)
+            .OrderBy(f => f.Status == FactStatus.Confirmed ? 0 : 1)
+            .ThenByDescending(f => MatchesNormalizedTerm(batchCorpus, f.NormalizedFactKey) ? 1 : 0)
+            .ThenByDescending(f => f.EvidenceSegmentOrder ?? -1)
+            .ThenByDescending(f => f.UpdatedAt);
+
+        var selected = new List<SceneFactContextItem>();
+        var usedChars = 0;
+        foreach (var fact in ordered)
+        {
+            if (selected.Count >= maxEntries) break;
+
+            var item = new SceneFactContextItem(
+                StoryEntityNormalizer.SanitizeForPrompt(fact.FactKey),
+                fact.FactType.ToString(),
+                StoryEntityNormalizer.SanitizeForPrompt(fact.Summary),
+                fact.Status.ToString());
+            var lineLen = EstimateSceneFactLineLength(item);
+            if (usedChars > 0 && usedChars + lineLen > maxChars) continue;
+            if (usedChars == 0 && lineLen > maxChars) continue;
+
+            selected.Add(item);
+            usedChars += lineLen;
+        }
+
+        return selected;
+    }
+
+    public IReadOnlyList<SpeechObservationContextItem> SelectSpeechObservationsForBatch(
+        IReadOnlyList<SpeechObservation> observations,
+        IReadOnlyList<string> batchSourceTexts,
+        IReadOnlyList<GlossaryContextItem>? matchedGlossary = null,
+        int maxEntries = MaxSpeechObservationsPerBatch,
+        int maxChars = MaxStoryNotesCharsPerBatch)
+    {
+        if (observations == null || observations.Count == 0 || maxEntries <= 0 || maxChars <= 0)
+        {
+            return Array.Empty<SpeechObservationContextItem>();
+        }
+
+        var batchCorpus = StoryEntityNormalizer.NormalizeKey(string.Join(" ", batchSourceTexts ?? Array.Empty<string>()));
+        var glossarySpeakers = new HashSet<string>(StringComparer.Ordinal);
+        if (matchedGlossary != null)
+        {
+            foreach (var g in matchedGlossary)
+            {
+                glossarySpeakers.Add(StoryEntityNormalizer.NormalizeKey(g.SourceTerm));
+                foreach (var a in g.Aliases)
+                {
+                    glossarySpeakers.Add(StoryEntityNormalizer.NormalizeKey(a));
+                }
+            }
+        }
+
+        var prioritized = observations
+            .Where(o => o.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Select(o => new
+            {
+                Obs = o,
+                DirectHit = MatchesNormalizedTerm(batchCorpus, o.NormalizedSpeakerName)
+                    || (!string.IsNullOrEmpty(o.NormalizedAddresseeName) && MatchesNormalizedTerm(batchCorpus, o.NormalizedAddresseeName)),
+                GlossaryHit = glossarySpeakers.Contains(o.NormalizedSpeakerName)
+            })
+            .Where(x => x.DirectHit || x.GlossaryHit)
+            .OrderByDescending(x => x.DirectHit ? 1 : 0)
+            .ThenBy(x => x.Obs.Status == FactStatus.Confirmed ? 0 : 1)
+            .ThenByDescending(x => x.Obs.UpdatedAt);
+
+        var selected = new List<SpeechObservationContextItem>();
+        var usedChars = 0;
+        foreach (var entry in prioritized)
+        {
+            if (selected.Count >= maxEntries) break;
+
+            var o = entry.Obs;
+            var item = new SpeechObservationContextItem(
+                StoryEntityNormalizer.SanitizeForPrompt(o.SpeakerName),
+                string.IsNullOrWhiteSpace(o.AddresseeName) ? null : StoryEntityNormalizer.SanitizeForPrompt(o.AddresseeName),
+                StoryEntityNormalizer.SanitizeForPrompt(o.SpeechRegister),
+                string.IsNullOrWhiteSpace(o.PronounStyle) ? null : StoryEntityNormalizer.SanitizeForPrompt(o.PronounStyle),
+                StoryEntityNormalizer.SanitizeForPrompt(o.Observation),
+                o.Status.ToString());
+            var lineLen = EstimateSpeechObservationLineLength(item);
+            if (usedChars > 0 && usedChars + lineLen > maxChars) continue;
+            if (usedChars == 0 && lineLen > maxChars) continue;
+
+            selected.Add(item);
+            usedChars += lineLen;
+        }
 
         return selected;
     }
@@ -112,6 +245,10 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
             return issues;
         }
 
+        var activeEntities = entities
+            .Where(e => e.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .ToList();
+
         foreach (var seg in completedSegments)
         {
             if (string.IsNullOrWhiteSpace(seg.SourceText) || string.IsNullOrWhiteSpace(seg.TranslatedText))
@@ -122,7 +259,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
             var sourceCorpus = StoryEntityNormalizer.NormalizeKey(seg.SourceText);
             var targetCorpus = StoryEntityNormalizer.NormalizeKey(seg.TranslatedText);
 
-            foreach (var entity in entities)
+            foreach (var entity in activeEntities)
             {
                 var matchedInSource = CollectMatchedTerms(sourceCorpus, entity);
                 if (matchedInSource.Count == 0) continue;
@@ -146,7 +283,6 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
 
     public static int EstimatePromptLineLength(GlossaryContextItem item)
     {
-        // Format: "- {SourceTerm} -> {TranslatedTerm} [{Category}] (Aliases: a, b) | Note: {Description}\n"
         var len = 10 + item.SourceTerm.Length + item.TranslatedTerm.Length + item.Category.Length;
         if (item.Aliases.Count > 0)
         {
@@ -158,6 +294,12 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         }
         return len;
     }
+
+    public static int EstimateSceneFactLineLength(SceneFactContextItem item) =>
+        16 + item.FactType.Length + item.FactKey.Length + item.Summary.Length + item.Status.Length;
+
+    public static int EstimateSpeechObservationLineLength(SpeechObservationContextItem item) =>
+        20 + item.SpeakerName.Length + (item.AddresseeName?.Length ?? 0) + item.SpeechRegister.Length + (item.PronounStyle?.Length ?? 0) + item.Observation.Length + item.Status.Length;
 
     private static GlossaryContextItem ToContextItem(StoryEntity entity)
     {
@@ -208,7 +350,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         return matched;
     }
 
-    internal static bool MatchesNormalizedTerm(string normalizedCorpus, string normalizedTerm)
+    public static bool MatchesNormalizedTerm(string normalizedCorpus, string normalizedTerm)
     {
         if (string.IsNullOrEmpty(normalizedCorpus) || string.IsNullOrEmpty(normalizedTerm))
         {

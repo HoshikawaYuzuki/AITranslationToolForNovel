@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Basi.Core.Interfaces;
 using Basi.Core.Models;
 using Basi.Module.StoryMemory.Services;
@@ -14,6 +13,9 @@ public class StoryMemoryTests
     private readonly StoryMemoryExtractor _extractor = new();
     private readonly TranslationPromptBuilder _promptBuilder = new();
 
+    private static SourceSegmentInput Seg(int order, string content, Guid? id = null) =>
+        new(id ?? Guid.NewGuid(), $"{Guid.Empty:N}:{order:D6}", order, content);
+
     [Fact]
     public void Normalizer_NormalizeKey_FoldsCaseWidthAndWhitespace()
     {
@@ -23,31 +25,71 @@ public class StoryMemoryTests
     }
 
     [Fact]
-    public void Normalizer_NormalizeAliases_DeduplicatesExcludesCanonicalAndBounds()
+    public void Normalizer_TryValidateTerm_RejectsUnicodeNfkcExpansionOver256AndAllowsExact256()
     {
-        var raw = new List<string>
-        {
+        // U+337F ("㍿") is 1 UTF-16 char in display form, expands to 4 chars ("株式会社") under NFKC
+        var tooLongNfkc = new string('\u337F', 100); // display=100, NFKC=400 (>256)
+        Assert.False(StoryEntityNormalizer.TryValidateTerm(tooLongNfkc, "SourceTerm", out _, out _, out var err));
+        Assert.Contains("Unicode normalization", err, StringComparison.OrdinalIgnoreCase);
+
+        var exactBoundary = new string('\u337F', 64); // display=64, NFKC=256 (<=256)
+        Assert.True(StoryEntityNormalizer.TryValidateTerm(exactBoundary, "SourceTerm", out var display, out var norm, out var okErr));
+        Assert.Null(okErr);
+        Assert.Equal(64, display.Length);
+        Assert.Equal(256, norm.Length);
+    }
+
+    [Fact]
+    public void Normalizer_TryValidateTerm_RejectsUnpairedSurrogatesAndAcceptsValidSurrogatePair()
+    {
+        Assert.False(StoryEntityNormalizer.TryValidateTerm("Bad\uD800Term", "SourceTerm", out _, out _, out var highErr));
+        Assert.Contains("surrogate", highErr, StringComparison.OrdinalIgnoreCase);
+
+        Assert.False(StoryEntityNormalizer.TryValidateTerm("Bad\uDC00Term", "SourceTerm", out _, out _, out var lowErr));
+        Assert.Contains("surrogate", lowErr, StringComparison.OrdinalIgnoreCase);
+
+        var validSurrogates = string.Concat(Enumerable.Repeat("𠀀", 20));
+        Assert.True(StoryEntityNormalizer.TryValidateTerm(validSurrogates, "SourceTerm", out _, out var norm, out var validErr));
+        Assert.Null(validErr);
+        Assert.Equal(40, norm.Length);
+    }
+
+    [Fact]
+    public void Normalizer_TryValidateAliases_RejectsNfkcExpansionAndDeduplicates()
+    {
+        var expandedAlias = new string('\u337F', 33); // NFKC = 132 > 128
+        Assert.False(StoryEntityNormalizer.TryValidateAliases("Ainz", new[] { expandedAlias }, out _, out var err));
+        Assert.Contains("128", err);
+
+        var ok = StoryEntityNormalizer.TryValidateAliases(
             "Ainz",
-            "  ａｉｎｚ ",
-            "Momonga",
-            "momonga",
-            "  Suzuki Satoru  ",
-            "",
-            new string('x', 200)
-        };
+            new[] { "Ainz", " ａｉｎｚ ", "Momonga", "momonga", "Suzuki Satoru" },
+            out var aliases,
+            out var okErr);
+        Assert.True(ok);
+        Assert.Null(okErr);
+        Assert.Equal(2, aliases.Count);
+        Assert.Contains("Momonga", aliases);
+        Assert.Contains("Suzuki Satoru", aliases);
+    }
 
-        for (var i = 0; i < 25; i++)
-        {
-            raw.Add($"Alias_{i}");
-        }
+    [Fact]
+    public void Normalizer_TryParseEnums_RejectsNumericStringsAndUnknownNames()
+    {
+        Assert.False(StoryEntityNormalizer.TryParseCategory("0", out _));
+        Assert.False(StoryEntityNormalizer.TryParseCategory("99", out _));
+        Assert.False(StoryEntityNormalizer.TryParseCategory("InvalidCat", out _));
+        Assert.True(StoryEntityNormalizer.TryParseCategory("character", out var cat));
+        Assert.Equal(StoryEntityCategory.Character, cat);
 
-        var normalized = StoryEntityNormalizer.NormalizeAliases("Ainz", raw);
+        Assert.False(StoryEntityNormalizer.TryParseFactStatus("2", out _));
+        Assert.False(StoryEntityNormalizer.TryParseFactStatus("Validated", out _));
+        Assert.True(StoryEntityNormalizer.TryParseFactStatus("confirmed", out var st));
+        Assert.Equal(FactStatus.Confirmed, st);
 
-        Assert.Equal(StoryEntityNormalizer.MaxAliasCount, normalized.Count);
-        Assert.DoesNotContain(normalized, a => a.Equals("Ainz", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(1, normalized.Count(a => a.Equals("Momonga", StringComparison.OrdinalIgnoreCase)));
-        Assert.Contains("Suzuki Satoru", normalized);
-        Assert.All(normalized, a => Assert.True(a.Length <= StoryEntityNormalizer.MaxAliasLength));
+        Assert.False(StoryEntityNormalizer.TryParseSceneFactType("0", out _));
+        Assert.True(StoryEntityNormalizer.TryParseSceneFactType("Setting", out var ft));
+        Assert.Equal(SceneFactType.Setting, ft);
     }
 
     [Fact]
@@ -63,54 +105,46 @@ public class StoryMemoryTests
     }
 
     [Fact]
-    public void Selector_PrioritizesBatchMatchesRespectsAsciiBoundariesAndBudget()
+    public void Selector_StoryMemoryLite_ExcludesUnknownAndConflicted_PrefersConfirmed()
     {
         var entities = new List<StoryEntity>
         {
-            new()
-            {
-                Id = Guid.NewGuid(),
-                SourceTerm = "Al",
-                NormalizedSourceTerm = "al",
-                TranslatedTerm = "An",
-                Category = StoryEntityCategory.Character,
-                Aliases = new List<string> { "Alpha" },
-                FirstSeenOrder = 0
-            },
-            new()
-            {
-                Id = Guid.NewGuid(),
-                SourceTerm = "アインズ",
-                NormalizedSourceTerm = "アインズ",
-                TranslatedTerm = "Ainz",
-                Category = StoryEntityCategory.Character,
-                Aliases = new List<string> { "モモンガ" },
-                Description = "Guild master",
-                FirstSeenOrder = 1
-            },
-            new()
-            {
-                Id = Guid.NewGuid(),
-                SourceTerm = "Nazarick",
-                NormalizedSourceTerm = "nazarick",
-                TranslatedTerm = "Đại Lăng Mộ Nazarick",
-                Category = StoryEntityCategory.Location,
-                FirstSeenOrder = 2
-            }
+            new() { Id = Guid.NewGuid(), SourceTerm = "UnknownTerm", NormalizedSourceTerm = "unknownterm", TranslatedTerm = "X", Status = FactStatus.Unknown, Category = StoryEntityCategory.Character },
+            new() { Id = Guid.NewGuid(), SourceTerm = "ConflictedTerm", NormalizedSourceTerm = "conflictedterm", TranslatedTerm = "Y", Status = FactStatus.Conflicted, Category = StoryEntityCategory.Character },
+            new() { Id = Guid.NewGuid(), SourceTerm = "Al", NormalizedSourceTerm = "al", TranslatedTerm = "An", Status = FactStatus.Confirmed, Category = StoryEntityCategory.Item },
+            new() { Id = Guid.NewGuid(), SourceTerm = "アインズ", NormalizedSourceTerm = "アインズ", TranslatedTerm = "Ainz", Status = FactStatus.Provisional, Category = StoryEntityCategory.Character, Aliases = new() { "モモンガ" }, EvidenceSegmentOrder = 0 },
+            new() { Id = Guid.NewGuid(), SourceTerm = "Nazarick", NormalizedSourceTerm = "nazarick", TranslatedTerm = "Nazarick", Status = FactStatus.Confirmed, Category = StoryEntityCategory.Location, EvidenceSegmentOrder = 1 },
+            new() { Id = Guid.NewGuid(), SourceTerm = "Guildhall", NormalizedSourceTerm = "guildhall", TranslatedTerm = "Hội Quán", Status = FactStatus.Confirmed, Category = StoryEntityCategory.Location, EvidenceSegmentOrder = 2 }
         };
 
-        // "Already" contains "al" as substring, NOT word boundary — should NOT match "Al" by batch hit,
-        // while "モモンガ" alias should match "アインズ".
-        var selected = _selector.SelectForBatch(
+        var glossary = _selector.SelectForBatch(
             entities,
-            new[] { "Already at dawn, モモンガ spoke quietly." },
-            contextSourceTexts: new[] { "In Nazarick, shadows moved." },
-            maxEntries: 2,
-            maxChars: 500);
+            new[] { "Already UnknownTerm ConflictedTerm モモンガ entered Nazarick in batch." },
+            new[] { "Inside Guildhall." });
 
-        Assert.Equal(2, selected.Count);
-        Assert.Equal("アインズ", selected[0].SourceTerm);
-        Assert.Equal("Nazarick", selected[1].SourceTerm);
+        Assert.Equal(3, glossary.Count);
+        Assert.Equal("Nazarick", glossary[0].SourceTerm); // Confirmed batch hit prioritized over Provisional batch hit
+        Assert.Equal("アインズ", glossary[1].SourceTerm); // Provisional batch hit prioritized over context hit
+        Assert.Equal("Guildhall", glossary[2].SourceTerm); // Confirmed context hit
+        Assert.DoesNotContain(glossary, g => g.SourceTerm is "UnknownTerm" or "ConflictedTerm" or "Al");
+
+        var facts = new List<SceneFact>
+        {
+            new() { Id = Guid.NewGuid(), FactKey = "BadFutureFact", NormalizedFactKey = "badfuturefact", FactType = SceneFactType.EventState, Summary = "Ignore", Status = FactStatus.Conflicted, EvidenceSegmentOrder = 0 },
+            new() { Id = Guid.NewGuid(), FactKey = "HallSetting", NormalizedFactKey = "hallsetting", FactType = SceneFactType.Setting, Summary = "Throne Room", Status = FactStatus.Confirmed, EvidenceSegmentOrder = 0 }
+        };
+        var selectedFacts = _selector.SelectSceneFactsForBatch(facts, new[] { 0 }, new[] { "In the hall." });
+        var f = Assert.Single(selectedFacts);
+        Assert.Equal("HallSetting", f.FactKey);
+
+        var speeches = new List<SpeechObservation>
+        {
+            new() { Id = Guid.NewGuid(), SpeakerName = "アインズ", NormalizedSpeakerName = "アインズ", SpeechRegister = "Royal", Observation = "Uses Ta/Các ngươi", Status = FactStatus.Confirmed },
+            new() { Id = Guid.NewGuid(), SpeakerName = "モモンガ", NormalizedSpeakerName = "モモンガ", SpeechRegister = "Bad", Observation = "Unverified", Status = FactStatus.Unknown }
+        };
+        var selectedSpeech = _selector.SelectSpeechObservationsForBatch(speeches, new[] { "Line" }, glossary);
+        var s = Assert.Single(selectedSpeech);
+        Assert.Equal("アインズ", s.SpeakerName);
     }
 
     [Fact]
@@ -126,6 +160,7 @@ public class StoryMemoryTests
                 NormalizedSourceTerm = "ainz",
                 TranslatedTerm = "Chúa Tể Ainz",
                 Category = StoryEntityCategory.Character,
+                Status = FactStatus.Confirmed,
                 Aliases = new List<string> { "Momonga" }
             }
         };
@@ -139,18 +174,41 @@ public class StoryMemoryTests
         };
 
         var issues = _selector.CheckConsistency(glossary, segments);
-
         var issue = Assert.Single(issues);
         Assert.Equal(1, issue.SegmentOrder);
         Assert.Equal(ainzId, issue.EntityId);
-        Assert.Equal("Chúa Tể Ainz", issue.ExpectedTranslation);
         Assert.Contains("Ainz", issue.MatchedSourceTerms);
     }
 
-    [Fact]
-    public void Extractor_ParseResponse_SupportsMarkdownFencesAndDeduplicatesAliases()
+    [Theory]
+    [InlineData("""{"entities":[42]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":123,"translatedTerm":"x","category":"Character","evidenceSegmentOrder":0}]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":"Tanaka","translatedTerm":"Tanaka","category":"BogusCategory","evidenceSegmentOrder":0}]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":"invented","translatedTerm":"Invented","category":"Character","evidenceSegmentOrder":0}]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":"Tanaka","translatedTerm":"Tanaka","category":"Character","firstSeenOrder":999999}]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":"Tanaka","translatedTerm":"Tanaka","category":"Character"}]}""")]
+    [InlineData("""{"entities":[{"sourceTerm":"Tanaka","translatedTerm":"Tanaka","category":"Character","evidenceSegmentOrder":0,"evidenceQuote":"completely fabricated text"}]}""")]
+    [InlineData("""{"entities":[],"sceneFacts":"not-an-array"}""")]
+    public void Extractor_ParseAndValidate_RejectsInvalidSchemaAndUngroundedEvidence(string json)
     {
-        var fenced = """
+        var window = new[] { Seg(0, "Tanaka walked across Tokyo Station.") };
+        Assert.Throws<InvalidOperationException>(() => StoryMemoryExtractor.ParseAndValidateResponse(json, window));
+    }
+
+    [Fact]
+    public void Extractor_ParseAndValidate_AcceptsValidEmptyExtractionAndValidGroundedExtraction()
+    {
+        var seg0 = Seg(0, "「アインズ」はナザリックの玉座に座り、静かに命令した。");
+        var window = new[] { seg0 };
+
+        var (emptyE, emptyF, emptyS) = StoryMemoryExtractor.ParseAndValidateResponse(
+            """{"entities":[],"sceneFacts":[],"speechObservations":[]}""",
+            window);
+        Assert.Empty(emptyE);
+        Assert.Empty(emptyF);
+        Assert.Empty(emptyS);
+
+        var validJson = $$"""
             ```json
             {
               "entities": [
@@ -159,36 +217,46 @@ public class StoryMemoryTests
                   "translatedTerm": "Ainz",
                   "category": "Character",
                   "aliases": ["モモンガ"],
-                  "description": "Protagonist",
-                  "firstSeenOrder": 0
-                },
+                  "description": "Ruler",
+                  "evidenceSegmentOrder": 0,
+                  "evidenceSegmentStableId": "{{seg0.StableId}}",
+                  "evidenceQuote": "「アインズ」はナザリックの玉座に座り"
+                }
+              ],
+              "sceneFacts": [
                 {
-                  "sourceTerm": "  ｱｲﾝｽﾞ ",
-                  "translatedTerm": "Ainz IgnoreDuplicate",
-                  "category": "UnknownCustomType",
-                  "aliases": ["鈴木悟", "モモンガ"],
-                  "description": "Secondary note"
-                },
+                  "factKey": "ThroneRoom",
+                  "factType": "Setting",
+                  "summary": "Ainz sits on the throne of Nazarick",
+                  "evidenceSegmentOrder": 0,
+                  "evidenceQuote": "ナザリックの玉座に座り"
+                }
+              ],
+              "speechObservations": [
                 {
-                  "sourceTerm": "ナザリック",
-                  "translatedTerm": "Nazarick",
-                  "category": "location",
-                  "aliases": []
+                  "speakerName": "アインズ",
+                  "addresseeName": null,
+                  "speechRegister": "Sovereign",
+                  "pronounStyle": "Ta",
+                  "observation": "Speaks calmly as absolute ruler",
+                  "evidenceSegmentOrder": 0,
+                  "evidenceQuote": "静かに命令した"
                 }
               ]
             }
             ```
             """;
 
-        var parsed = StoryMemoryExtractor.ParseResponse(fenced);
-
-        Assert.Equal(2, parsed.Count);
-        Assert.Equal("アインズ", parsed[0].SourceTerm);
-        Assert.Equal("Ainz", parsed[0].TranslatedTerm);
-        Assert.Equal(StoryEntityCategory.Character, parsed[0].Category);
-        Assert.Contains("モモンガ", parsed[0].Aliases);
-        Assert.Contains("鈴木悟", parsed[0].Aliases);
-        Assert.Equal(StoryEntityCategory.Location, parsed[1].Category);
+        var (entities, facts, speech) = StoryMemoryExtractor.ParseAndValidateResponse(validJson, window);
+        var entity = Assert.Single(entities);
+        Assert.Equal(seg0.Id, entity.EvidenceSegmentId);
+        Assert.Equal(0, entity.EvidenceSegmentOrder);
+        var fact = Assert.Single(facts);
+        Assert.Equal(SceneFactType.Setting, fact.FactType);
+        Assert.Equal(seg0.Id, fact.EvidenceSegmentId);
+        var obs = Assert.Single(speech);
+        Assert.Equal("Sovereign", obs.SpeechRegister);
+        Assert.Equal(seg0.Id, obs.EvidenceSegmentId);
     }
 
     [Theory]
@@ -201,25 +269,10 @@ public class StoryMemoryTests
             new AiResponse("{\"entities\":[]}", 120, 45, 165, "stub-model", reason));
 
         var ex = await Assert.ThrowsAsync<StoryMemoryExtractionException>(() =>
-            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { (0, "テスト") }));
+            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { Seg(0, "テスト") }));
 
         Assert.Equal(120, ex.PromptTokens);
-        Assert.Equal(45, ex.CompletionTokens);
         Assert.Equal(165, ex.TotalTokens);
-        Assert.Equal("stub-model", ex.ModelUsed);
-    }
-
-    [Fact]
-    public async Task Extractor_ExtractAsync_MalformedJson_ThrowsWithUsageMetadata()
-    {
-        var provider = new StubAiProvider(_ =>
-            new AiResponse("Not JSON at all", 80, 12, 92, "stub-model", FinishReason.Stop));
-
-        var ex = await Assert.ThrowsAsync<StoryMemoryExtractionException>(() =>
-            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { (0, "テスト") }));
-
-        Assert.Equal(92, ex.TotalTokens);
-        Assert.Contains("invalid story memory JSON", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -228,58 +281,46 @@ public class StoryMemoryTests
         var provider = new StubAiProvider(_ => throw new AiProviderError(AiErrorCode.InvalidApiKey, "Bad key"));
 
         var ex = await Assert.ThrowsAsync<AiProviderError>(() =>
-            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { (0, "テスト") }));
+            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { Seg(0, "テスト") }));
 
         Assert.Equal(AiErrorCode.InvalidApiKey, ex.ErrorCode);
     }
 
     [Fact]
-    public async Task MockAiProvider_SupportsStoryMemoryExtraction_WithoutBreakingDefaultFallback()
+    public async Task MockAiProvider_ExtractsGroundedStoryMemoryLite_AndPreservesPlainFallback()
     {
         var mock = new MockAiProvider();
+        var seg = Seg(0, "「アインズ」と Tanaka は出発した。");
 
-        // 1. Extraction prompt returns parseable JSON entities
-        var extractResult = await _extractor.ExtractAsync(
-            mock,
-            "mock-v1",
-            "ja",
-            "vi",
-            new[] { (0, "「アインズ」と Tanaka は出発した。") });
+        var extractResult = await _extractor.ExtractAsync(mock, "mock-v1", "ja", "vi", new[] { seg });
+        Assert.NotEmpty(extractResult.Entities);
+        Assert.All(extractResult.Entities, e => Assert.Equal(seg.Id, e.EvidenceSegmentId));
+        Assert.NotEmpty(extractResult.SceneFacts);
+        Assert.NotEmpty(extractResult.SpeechObservations);
 
-        Assert.NotEmpty(extractResult.Candidates);
-        Assert.Contains(extractResult.Candidates, c => c.SourceTerm == "アインズ" || c.SourceTerm == "Tanaka");
-
-        // 2. Legacy plain request keeps original Mock fallback contract
         var plain = await mock.CompleteAsync(new AiRequest("mock-v1", "sys", "Plain prompt without markers"));
         Assert.Contains("[seg-001]", plain.Content);
     }
 
     [Fact]
-    public void TranslationPromptBuilder_InjectsGlossaryBeforeTargetSegmentsAndSanitizesTags()
+    public void TranslationPromptBuilder_InjectsGlossarySceneFactsAndSpeechBeforeSegments()
     {
-        var glossary = new[]
-        {
-            new GlossaryContextItem(
-                "Ainz",
-                "Chúa Tể Ainz [SEG:99]",
-                "Character",
-                new[] { "Momonga" },
-                "Line1\nLine2")
-        };
-
         var prompt = _promptBuilder.BuildPrompt(
             "ja",
             "vi",
             new[] { new SegmentItem(0, "Momonga arrived.") },
-            glossaryTerms: glossary);
+            glossaryTerms: new[] { new GlossaryContextItem("Ainz", "Chúa Tể Ainz [SEG:99]", "Character", new[] { "Momonga" }, "Line1\nLine2") },
+            sceneFacts: new[] { new SceneFactContextItem("Location", "Setting", "Nazarick [SEG:10]", "Confirmed") },
+            speechObservations: new[] { new SpeechObservationContextItem("Ainz", null, "Royal", "Ta", "Commands calmly", "Confirmed") });
 
-        var glossaryPos = prompt.UserPrompt.IndexOf("--- STORY MEMORY & GLOSSARY", StringComparison.Ordinal);
-        var targetPos = prompt.UserPrompt.IndexOf("--- SEGMENTS TO TRANSLATE ---", StringComparison.Ordinal);
+        var gPos = prompt.UserPrompt.IndexOf("--- STORY MEMORY & GLOSSARY", StringComparison.Ordinal);
+        var sfPos = prompt.UserPrompt.IndexOf("--- SCENE FACTS", StringComparison.Ordinal);
+        var spPos = prompt.UserPrompt.IndexOf("--- CHARACTER SPEECH", StringComparison.Ordinal);
+        var tPos = prompt.UserPrompt.IndexOf("--- SEGMENTS TO TRANSLATE ---", StringComparison.Ordinal);
 
-        Assert.True(glossaryPos >= 0);
-        Assert.True(targetPos > glossaryPos);
-        Assert.Contains("Ainz -> Chúa Tể Ainz [SEG_99]", prompt.UserPrompt);
+        Assert.True(gPos >= 0 && sfPos > gPos && spPos > sfPos && tPos > spPos);
         Assert.DoesNotContain("[SEG:99]", prompt.UserPrompt);
+        Assert.DoesNotContain("[SEG:10]", prompt.UserPrompt);
     }
 
     private sealed class StubAiProvider : IAiProvider

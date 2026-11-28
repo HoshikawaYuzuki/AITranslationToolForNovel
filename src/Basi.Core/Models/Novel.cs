@@ -20,4 +20,8 @@ public sealed class Novel
     public ICollection<Segment> Segments { get; init; } = new List<Segment>();
 
     public ICollection<StoryEntity> StoryEntities { get; init; } = new List<StoryEntity>();
+
+    public ICollection<SceneFact> SceneFacts { get; init; } = new List<SceneFact>();
+
+    public ICollection<SpeechObservation> SpeechObservations { get; init; } = new List<SpeechObservation>();
 }

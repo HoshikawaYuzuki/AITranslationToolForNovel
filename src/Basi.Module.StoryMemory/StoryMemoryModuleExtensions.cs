@@ -9,6 +9,7 @@ public static class StoryMemoryModuleExtensions
     {
         services.AddSingleton<IStoryMemorySelector, StoryMemorySelector>();
         services.AddSingleton<IStoryMemoryExtractor, StoryMemoryExtractor>();
+        services.AddSingleton<StoryMemoryMergeGate>();
         return services;
     }
 }

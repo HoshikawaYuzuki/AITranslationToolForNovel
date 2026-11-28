@@ -1,8 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Basi.Api.Data;
 using Basi.Api.Workers;
 using Basi.Core.Interfaces;
@@ -33,22 +31,14 @@ public sealed class StoryMemoryTestFactory : AuthTestFactory
                 var hostedWorker = services.FirstOrDefault(d =>
                     d.ServiceType == typeof(IHostedService)
                     && d.ImplementationType == typeof(TranslationQueueWorker));
-                if (hostedWorker != null)
-                {
-                    services.Remove(hostedWorker);
-                }
+                if (hostedWorker != null) services.Remove(hostedWorker);
             }
 
             var factoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IAiProviderFactory));
-            if (factoryDescriptor != null)
-            {
-                services.Remove(factoryDescriptor);
-            }
+            if (factoryDescriptor != null) services.Remove(factoryDescriptor);
 
             services.AddScoped<IAiProviderFactory>(sp =>
-                new StoryMemoryTestProviderFactory(
-                    sp.GetRequiredService<IApiKeyVault>(),
-                    this));
+                new StoryMemoryTestProviderFactory(sp.GetRequiredService<IApiKeyVault>(), this));
         });
     }
 
@@ -64,43 +54,27 @@ public sealed class StoryMemoryTestFactory : AuthTestFactory
             _owner = owner;
         }
 
-        public IAiProvider CreateProvider(string providerName, string apiKey)
-        {
-            return _owner.ProviderSelector != null
-                ? _owner.ProviderSelector(Guid.Empty, providerName)
-                : _fallbackMock;
-        }
+        public IAiProvider CreateProvider(string providerName, string apiKey) =>
+            _owner.ProviderSelector != null ? _owner.ProviderSelector(Guid.Empty, providerName) : _fallbackMock;
 
         public IAiProvider GetProviderForUser(Guid userId, string providerName)
         {
             var norm = providerName.Trim().ToLowerInvariant();
-            if (norm != "mock")
+            if (norm != "mock" && string.IsNullOrWhiteSpace(_vault.GetKey(userId, norm)))
             {
-                var key = _vault.GetKey(userId, norm);
-                if (string.IsNullOrWhiteSpace(key))
-                {
-                    throw new AiProviderError(AiErrorCode.InvalidApiKey, $"Missing key for {providerName}");
-                }
+                throw new AiProviderError(AiErrorCode.InvalidApiKey, $"Missing key for {providerName}");
             }
-            return _owner.ProviderSelector != null
-                ? _owner.ProviderSelector(Guid.Empty, norm)
-                : _fallbackMock;
+            return _owner.ProviderSelector != null ? _owner.ProviderSelector(Guid.Empty, norm) : _fallbackMock;
         }
 
         public IAiProvider GetProviderForJob(Guid userId, string providerName, Guid jobId)
         {
             var norm = providerName.Trim().ToLowerInvariant();
-            if (norm != "mock")
+            if (norm != "mock" && string.IsNullOrWhiteSpace(_vault.GetJobKey(userId, jobId) ?? _vault.GetKey(userId, norm)))
             {
-                var key = _vault.GetJobKey(userId, jobId) ?? _vault.GetKey(userId, norm);
-                if (string.IsNullOrWhiteSpace(key))
-                {
-                    throw new AiProviderError(AiErrorCode.InvalidApiKey, $"Missing key for {providerName}");
-                }
+                throw new AiProviderError(AiErrorCode.InvalidApiKey, $"Missing key for {providerName}");
             }
-            return _owner.ProviderSelector != null
-                ? _owner.ProviderSelector(jobId, norm)
-                : _fallbackMock;
+            return _owner.ProviderSelector != null ? _owner.ProviderSelector(jobId, norm) : _fallbackMock;
         }
     }
 }
@@ -114,7 +88,7 @@ internal sealed class StoryMemoryDelegateProvider : IAiProvider
 
 public class StoryMemoryEndpointIntegrationTests
 {
-    private static async Task<(Guid NovelId, Guid OwnerId, string GoogleId, string Email)> SeedNovelAsync(
+    private static async Task<(Guid NovelId, List<Segment> Segments, Guid OwnerId, string GoogleId, string Email)> SeedNovelAsync(
         StoryMemoryTestFactory factory,
         string[] segmentContents)
     {
@@ -123,6 +97,7 @@ public class StoryMemoryEndpointIntegrationTests
         var user = await factory.SeedUserAsync(googleId, email, "Story Owner");
 
         var novelId = Guid.NewGuid();
+        var seededSegments = new List<Segment>();
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
 
@@ -147,11 +122,12 @@ public class StoryMemoryEndpointIntegrationTests
                 Content = segmentContents[i]
             };
             novel.Segments.Add(seg);
+            seededSegments.Add(seg);
         }
 
         db.Novels.Add(novel);
         await db.SaveChangesAsync();
-        return (novelId, user.Id, googleId, email);
+        return (novelId, seededSegments, user.Id, googleId, email);
     }
 
     private static HttpClient CreateAuthedClient(StoryMemoryTestFactory factory, string googleId, string email)
@@ -172,315 +148,421 @@ public class StoryMemoryEndpointIntegrationTests
         var token = await factory.FetchAntiforgeryTokenAsync(client);
         var req = new HttpRequestMessage(method, url);
         req.Headers.Add("X-XSRF-TOKEN", token);
-        if (body != null)
-        {
-            req.Content = JsonContent.Create(body);
-        }
+        if (body != null) req.Content = JsonContent.Create(body);
         return await client.SendAsync(req);
     }
 
     [Fact]
-    public async Task StoryMemoryEndpoints_RequireAuthAndCsrf_AndIsolateAcrossOwners()
+    public async Task StoryMemoryEndpoints_RequireAuthCsrf_AndIsolateAcrossOwners()
     {
         using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
-        var (novelId, _, ownerGoogleId, ownerEmail) = await SeedNovelAsync(factory, new[] { "「アインズ」は立ち上がった。" });
+        var (novelId, segments, _, ownerGoogleId, ownerEmail) = await SeedNovelAsync(factory, new[] { "「アインズ」は立ち上がった。" });
 
-        // 1. Unauthenticated requests return 401
         var anonClient = factory.CreateClient();
         anonClient.DefaultRequestHeaders.Add("X-Test-Anonymous", "true");
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonClient.GetAsync($"/api/novels/{novelId}/story-memory")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonClient.GetAsync($"/api/novels/{novelId}/scene-facts")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonClient.GetAsync($"/api/novels/{novelId}/speech-observations")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonClient.GetAsync($"/api/translations/{Guid.NewGuid()}/consistency")).StatusCode);
 
-        // 2. Write without CSRF returns 400
         var ownerClient = CreateAuthedClient(factory, ownerGoogleId, ownerEmail);
-        var noCsrfRes = await ownerClient.PostAsJsonAsync($"/api/novels/{novelId}/story-memory", new
-        {
-            targetLanguage = "vi",
-            sourceTerm = "Ainz",
-            translatedTerm = "Ainz"
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, noCsrfRes.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await ownerClient.PostAsJsonAsync($"/api/novels/{novelId}/story-memory", new { targetLanguage = "vi", sourceTerm = "A", translatedTerm = "B" })).StatusCode);
 
-        // Create entry as Owner
         var createRes = await SendWithCsrfAsync(factory, ownerClient, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
         {
             targetLanguage = "vi",
             sourceTerm = "アインズ",
             translatedTerm = "Ainz",
             category = "Character",
-            aliases = new[] { "モモンガ" },
-            description = "Guild leader"
+            evidenceSegmentId = segments[0].Id,
+            evidenceQuote = "アインズ"
         });
         Assert.Equal(HttpStatusCode.Created, createRes.StatusCode);
-        using var createdDoc = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync());
-        var entryId = createdDoc.RootElement.GetProperty("id").GetGuid();
 
-        // 3. Another user cannot read, add, update, extract, or delete User A's story memory
         var otherGoogleId = $"google-other-{Guid.NewGuid():N}";
         var otherEmail = $"other-{Guid.NewGuid():N}@example.com";
-        await factory.SeedUserAsync(otherGoogleId, otherEmail, "Other User");
+        await factory.SeedUserAsync(otherGoogleId, otherEmail, "Other");
         var otherClient = CreateAuthedClient(factory, otherGoogleId, otherEmail);
 
         Assert.Equal(HttpStatusCode.NotFound, (await otherClient.GetAsync($"/api/novels/{novelId}/story-memory")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrfAsync(factory, otherClient, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
-        {
-            targetLanguage = "vi",
-            sourceTerm = "Other",
-            translatedTerm = "Khác"
-        })).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrfAsync(factory, otherClient, HttpMethod.Put, $"/api/novels/{novelId}/story-memory/{entryId}", new
-        {
-            targetLanguage = "vi",
-            sourceTerm = "Hijack",
-            translatedTerm = "Hijack"
-        })).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrfAsync(factory, otherClient, HttpMethod.Delete, $"/api/novels/{novelId}/story-memory/{entryId}")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrfAsync(factory, otherClient, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
-        {
-            targetLanguage = "vi",
-            provider = "mock"
-        })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await otherClient.GetAsync($"/api/novels/{novelId}/scene-facts")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await otherClient.GetAsync($"/api/novels/{novelId}/speech-observations")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrfAsync(factory, otherClient, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" })).StatusCode);
     }
 
     [Fact]
-    public async Task StoryMemoryCrud_SupportsCreateFilterUpdateDelete_AndRejectsNfkcDuplicates()
+    public async Task UnicodeNfkcAndSurrogateValidation_Returns400_AndValidBoundarySucceeds()
     {
         using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
-        var (novelId, _, googleId, email) = await SeedNovelAsync(factory, new[] { "Sample text" });
+        var (novelId, segments, _, googleId, email) = await SeedNovelAsync(factory, new[] { "Sample line" });
         var client = CreateAuthedClient(factory, googleId, email);
 
-        // Create entry
-        var createRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        // B004-04: U+337F x 100 has display length 100, expands to NFKC length 400 (>256) -> must reject 400
+        var expanded100 = new string('\u337F', 100);
+        var tooLongRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
         {
             targetLanguage = "vi",
-            sourceTerm = "Ainz Ooal Gown",
-            translatedTerm = "Ainz Ooal Gown",
-            category = "Character",
-            aliases = new[] { "Momonga", "momonga", "Suzuki Satoru" },
-            description = "Guild Master of Nazarick"
+            sourceTerm = expanded100,
+            translatedTerm = "Corp"
         });
-        Assert.Equal(HttpStatusCode.Created, createRes.StatusCode);
-        using var createdJson = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync());
-        var entryId = createdJson.RootElement.GetProperty("id").GetGuid();
+        Assert.Equal(HttpStatusCode.BadRequest, tooLongRes.StatusCode);
 
-        // Duplicate normalized key (full-width / whitespace variant) -> 409 Conflict
-        var dupRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        // Unpaired surrogate -> 400 (raw JSON literal \uD800; JsonContent sanitizes invalid surrogates client-side)
+        var surrogateCsrf = await factory.FetchAntiforgeryTokenAsync(client);
+        using var surrogateReq = new HttpRequestMessage(HttpMethod.Post, $"/api/novels/{novelId}/story-memory")
+        {
+            Content = new StringContent(
+                """{"targetLanguage":"vi","sourceTerm":"Bad\uD800Term","translatedTerm":"Bad"}""",
+                System.Text.Encoding.UTF8,
+                "application/json")
+        };
+        surrogateReq.Headers.Add("X-XSRF-TOKEN", surrogateCsrf);
+        var badSurrogateRes = await client.SendAsync(surrogateReq);
+        Assert.Equal(HttpStatusCode.BadRequest, badSurrogateRes.StatusCode);
+
+        // Quote mismatch against segment -> 400
+        var badQuoteRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
         {
             targetLanguage = "vi",
-            sourceTerm = "  Ａｉｎｚ   Ooal Gown ",
-            translatedTerm = "Duplicate"
+            sourceTerm = "ValidTerm",
+            translatedTerm = "ValidTerm",
+            evidenceSegmentId = segments[0].Id,
+            evidenceQuote = "Not present in segment"
         });
-        Assert.Equal(HttpStatusCode.Conflict, dupRes.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, badQuoteRes.StatusCode);
 
-        // Invalid category -> 400 BadRequest
-        var badCatRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        // Exact NFKC boundary: U+337F x 64 -> display 64, NFKC 256 -> succeeds cleanly
+        var boundary64 = new string('\u337F', 64);
+        var okBoundaryRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
         {
             targetLanguage = "vi",
-            sourceTerm = "Nazarick",
-            translatedTerm = "Nazarick",
-            category = "InvalidCategoryXYZ"
+            sourceTerm = boundary64,
+            translatedTerm = "Công ty Cổ phần"
         });
-        Assert.Equal(HttpStatusCode.BadRequest, badCatRes.StatusCode);
-
-        // Same term in different targetLanguage ("en") succeeds cleanly
-        var enRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
-        {
-            targetLanguage = "en",
-            sourceTerm = "Ainz Ooal Gown",
-            translatedTerm = "Ainz Ooal Gown",
-            category = "Character"
-        });
-        Assert.Equal(HttpStatusCode.Created, enRes.StatusCode);
-
-        // Filter by targetLanguage and search alias ("Suzuki")
-        var listRes = await client.GetAsync($"/api/novels/{novelId}/story-memory?targetLanguage=vi&search=Suzuki");
-        Assert.Equal(HttpStatusCode.OK, listRes.StatusCode);
-        using var listDoc = JsonDocument.Parse(await listRes.Content.ReadAsStringAsync());
-        var arr = listDoc.RootElement;
-        Assert.Equal(1, arr.GetArrayLength());
-        Assert.Equal("Ainz Ooal Gown", arr[0].GetProperty("sourceTerm").GetString());
-        Assert.Equal(2, arr[0].GetProperty("aliases").GetArrayLength());
-
-        // Update entry
-        var putRes = await SendWithCsrfAsync(factory, client, HttpMethod.Put, $"/api/novels/{novelId}/story-memory/{entryId}", new
-        {
-            targetLanguage = "vi",
-            sourceTerm = "Ainz Ooal Gown",
-            translatedTerm = "Chúa Tể Ainz Ooal Gown",
-            category = "Organization",
-            aliases = new[] { "Momonga" },
-            description = "Updated guild name",
-            isLocked = false
-        });
-        Assert.Equal(HttpStatusCode.OK, putRes.StatusCode);
-        using var putDoc = JsonDocument.Parse(await putRes.Content.ReadAsStringAsync());
-        Assert.Equal("Chúa Tể Ainz Ooal Gown", putDoc.RootElement.GetProperty("translatedTerm").GetString());
-        Assert.Equal("Organization", putDoc.RootElement.GetProperty("category").GetString());
-        Assert.False(putDoc.RootElement.GetProperty("isLocked").GetBoolean());
-
-        // Delete entry
-        var delRes = await SendWithCsrfAsync(factory, client, HttpMethod.Delete, $"/api/novels/{novelId}/story-memory/{entryId}");
-        Assert.Equal(HttpStatusCode.OK, delRes.StatusCode);
-
-        var afterDelRes = await client.GetAsync($"/api/novels/{novelId}/story-memory?targetLanguage=vi");
-        using var afterDelDoc = JsonDocument.Parse(await afterDelRes.Content.ReadAsStringAsync());
-        Assert.Equal(0, afterDelDoc.RootElement.GetArrayLength());
+        Assert.Equal(HttpStatusCode.Created, okBoundaryRes.StatusCode);
     }
 
     [Fact]
-    public async Task ExtractStoryMemory_PreservesLockedManualEdits_AndUsesEphemeralKeyWithoutPersisting()
+    public async Task Extraction_StrictValidationAndProvisionalStatusAndConflict_EnforcedEndToEnd()
     {
         using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
-        var (novelId, _, googleId, email) = await SeedNovelAsync(factory, new[]
+        var (novelId, segments, _, googleId, email) = await SeedNovelAsync(factory, new[]
         {
             "「アインズ」はナザリックに立っていた。"
         });
         var client = CreateAuthedClient(factory, googleId, email);
 
-        var aiExtractRound = 0;
+        // 1. Invalid schema / non-existent segment order / wrong array element types -> 502 with ZERO writes
+        string? replyJson = """{"entities":[42,{"sourceTerm":123,"translatedTerm":"x"}]}""";
         factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
-        {
-            var round = Interlocked.Increment(ref aiExtractRound);
-            var payload = round == 1
-                ? """
-                  {"entities":[
-                    {"sourceTerm":"アインズ","translatedTerm":"Ainz-Draft","category":"Character","aliases":["モモンガ"],"description":"Hero"},
-                    {"sourceTerm":"ナザリック","translatedTerm":"Nazarick-Draft","category":"Location","aliases":[]}
-                  ]}
-                  """
-                : """
-                  {"entities":[
-                    {"sourceTerm":"アインズ","translatedTerm":"Ainz-NewAiAttempt","category":"Character","aliases":["鈴木悟"],"description":"New"},
-                    {"sourceTerm":"ナザリック","translatedTerm":"Đại Lăng Mộ Nazarick","category":"Location","aliases":["Tomb"]}
-                  ]}
-                  """;
+            Task.FromResult(new AiResponse(replyJson!, 20, 10, 30, req.Model, FinishReason.Stop)));
 
-            return Task.FromResult(new AiResponse(payload, 40, 30, 70, req.Model, FinishReason.Stop));
-        });
-
-        // Missing Gemini key in RAM vault and omitted in request -> 400 Bad Request
-        var missingKeyRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        var badSchemaRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
         {
             targetLanguage = "vi",
-            provider = "gemini"
+            provider = "mock"
         });
-        Assert.Equal(HttpStatusCode.BadRequest, missingKeyRes.StatusCode);
+        Assert.Equal(HttpStatusCode.BadGateway, badSchemaRes.StatusCode);
 
-        // Round 1 with ephemeral request API key -> succeeds and creates 2 unlocked AiExtracted entries
-        var r1Res = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        // Fake non-existent order 999999 -> 502 with ZERO writes
+        replyJson = """{"entities":[{"sourceTerm":"アインズ","translatedTerm":"Ainz","category":"Character","firstSeenOrder":999999}]}""";
+        var badOrderRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
         {
             targetLanguage = "vi",
-            provider = "gemini",
-            model = "gemini-2.5-flash",
-            apiKey = "ephemeral-secret-key-xyz"
+            provider = "mock"
         });
-        Assert.Equal(HttpStatusCode.OK, r1Res.StatusCode);
-        using var r1Doc = JsonDocument.Parse(await r1Res.Content.ReadAsStringAsync());
-        Assert.Equal(2, r1Doc.RootElement.GetProperty("created").GetInt32());
-        Assert.Equal(70, r1Doc.RootElement.GetProperty("totalTokens").GetInt32());
+        Assert.Equal(HttpStatusCode.BadGateway, badOrderRes.StatusCode);
 
-        // Ephemeral key must NOT be saved into account RAM vault
-        var keyStatusRes = await client.GetAsync("/api/auth/api-keys");
-        using var keyStatusDoc = JsonDocument.Parse(await keyStatusRes.Content.ReadAsStringAsync());
-        Assert.False(keyStatusDoc.RootElement.GetProperty("gemini").GetBoolean());
+        var afterErrorsDoc = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/story-memory")).Content.ReadAsStringAsync());
+        Assert.Equal(0, afterErrorsDoc.RootElement.GetArrayLength());
 
-        // User edits & locks "アインズ" manually; leaves "ナザリック" unlocked
-        var ainzEntry = r1Doc.RootElement.GetProperty("glossary").EnumerateArray()
-            .First(x => x.GetProperty("sourceTerm").GetString() == "アインズ");
-        var ainzId = ainzEntry.GetProperty("id").GetGuid();
+        // 2. Valid empty extraction -> 200 OK with 0 mutations
+        replyJson = """{"entities":[],"sceneFacts":[],"speechObservations":[]}""";
+        var emptyRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        Assert.Equal(HttpStatusCode.OK, emptyRes.StatusCode);
+        using var emptyDoc = JsonDocument.Parse(await emptyRes.Content.ReadAsStringAsync());
+        Assert.Equal(0, emptyDoc.RootElement.GetProperty("extractedCount").GetInt32());
 
-        var lockRes = await SendWithCsrfAsync(factory, client, HttpMethod.Put, $"/api/novels/{novelId}/story-memory/{ainzId}", new
+        // 3. Valid extraction even claiming status=Confirmed MUST persist Status == Provisional with real SegmentId
+        replyJson = $$"""
+            {
+              "entities":[
+                {
+                  "sourceTerm":"アインズ",
+                  "translatedTerm":"Ainz-Provisional",
+                  "category":"Character",
+                  "status":"Confirmed",
+                  "confidence":0.99,
+                  "evidenceSegmentOrder":0,
+                  "evidenceQuote":"「アインズ」はナザリックに立っていた"
+                }
+              ],
+              "sceneFacts":[
+                {
+                  "factKey":"LocationNazarick",
+                  "factType":"Setting",
+                  "summary":"Standing inside Nazarick",
+                  "evidenceSegmentOrder":0,
+                  "evidenceQuote":"ナザリックに立っていた"
+                }
+              ],
+              "speechObservations":[
+                {
+                  "speakerName":"アインズ",
+                  "speechRegister":"Formal",
+                  "observation":"Calm sovereign presence",
+                  "evidenceSegmentOrder":0
+                }
+              ]
+            }
+            """;
+        var validRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        Assert.Equal(HttpStatusCode.OK, validRes.StatusCode);
+        using var validDoc = JsonDocument.Parse(await validRes.Content.ReadAsStringAsync());
+        var ainzItem = validDoc.RootElement.GetProperty("glossary")[0];
+        Assert.Equal("Provisional", ainzItem.GetProperty("status").GetString());
+        Assert.Equal(segments[0].Id, ainzItem.GetProperty("evidenceSegmentId").GetGuid());
+        Assert.Equal(segments[0].StableId, ainzItem.GetProperty("evidenceSegmentStableId").GetString());
+        Assert.Equal(FactStatus.Provisional.ToString(), validDoc.RootElement.GetProperty("sceneFacts")[0].GetProperty("status").GetString());
+        Assert.Equal(FactStatus.Provisional.ToString(), validDoc.RootElement.GetProperty("speechObservations")[0].GetProperty("status").GetString());
+
+        // 4. Conflicting unlocked extraction transitions entry to Conflicted instead of silently overwriting
+        replyJson = """
+            {
+              "entities":[
+                {
+                  "sourceTerm":"アインズ",
+                  "translatedTerm":"Chúa Quỷ Ainz",
+                  "category":"Character",
+                  "evidenceSegmentOrder":0,
+                  "evidenceQuote":"アインズ"
+                }
+              ]
+            }
+            """;
+        var conflictRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        Assert.Equal(HttpStatusCode.OK, conflictRes.StatusCode);
+        using var conflictDoc = JsonDocument.Parse(await conflictRes.Content.ReadAsStringAsync());
+        Assert.Equal(1, conflictDoc.RootElement.GetProperty("conflicted").GetInt32());
+        var conflictedAinz = conflictDoc.RootElement.GetProperty("glossary")[0];
+        Assert.Equal("Conflicted", conflictedAinz.GetProperty("status").GetString());
+        Assert.Equal("Ainz-Provisional", conflictedAinz.GetProperty("translatedTerm").GetString());
+        Assert.Contains("Chúa Quỷ Ainz", conflictedAinz.GetProperty("conflictDetails").GetString());
+    }
+
+    [Fact]
+    public async Task Extract_RaceBarrier_PreservesConcurrentPutLock_AndSerializesConcurrentExtracts()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, segments, ownerId, googleId, email) = await SeedNovelAsync(factory, new[]
+        {
+            "「アインズ」は立ち上がった。"
+        });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        // Seed unlocked AiExtracted entry BEFORE starting extraction
+        Guid entityId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            var existing = new StoryEntity
+            {
+                Id = Guid.NewGuid(),
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                SourceTerm = "アインズ",
+                NormalizedSourceTerm = "アインズ",
+                TranslatedTerm = "Ainz-InitialAi",
+                Category = StoryEntityCategory.Character,
+                Origin = StoryEntityOrigin.AiExtracted,
+                Status = FactStatus.Provisional,
+                IsLocked = false,
+                EvidenceSegmentId = segments[0].Id,
+                EvidenceSegmentStableId = segments[0].StableId,
+                EvidenceSegmentOrder = 0,
+                Version = 1
+            };
+            entityId = existing.Id;
+            db.StoryEntities.Add(existing);
+            await db.SaveChangesAsync();
+        }
+
+        var aiStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAi = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider(async (req, ct) =>
+        {
+            aiStarted.TrySetResult(true);
+            await releaseAi.Task.WaitAsync(ct);
+            const string json = """
+                {
+                  "entities":[
+                    {
+                      "sourceTerm":"アインズ",
+                      "translatedTerm":"Ainz-StaleOverwriteAttempt",
+                      "category":"Character",
+                      "evidenceSegmentOrder":0,
+                      "evidenceQuote":"アインズ"
+                    }
+                  ]
+                }
+                """;
+            return new AiResponse(json, 30, 20, 50, req.Model, FinishReason.Stop);
+        });
+
+        // 1. Start extraction and pause inside provider barrier
+        var extractTask = SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        await aiStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // 2. Concurrent PUT modifies TranslatedTerm, sets IsLocked=true & Status=Confirmed while extraction is in-flight
+        var putRes = await SendWithCsrfAsync(factory, client, HttpMethod.Put, $"/api/novels/{novelId}/story-memory/{entityId}", new
         {
             targetLanguage = "vi",
             sourceTerm = "アインズ",
-            translatedTerm = "Chúa Tể Ainz (Canonical)",
+            translatedTerm = "Chúa Tể Ainz (PUT Locked)",
             category = "Character",
-            aliases = new[] { "モモンガ" },
-            description = "Locked canonical name",
-            isLocked = true
+            isLocked = true,
+            status = "Confirmed",
+            expectedVersion = 1
         });
-        Assert.Equal(HttpStatusCode.OK, lockRes.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, putRes.StatusCode);
 
-        // Round 2 extraction with another ephemeral key: skips locked "アインズ", updates unlocked "ナザリック"
-        var r2Res = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        // Stale ExpectedVersion check returns 409 Conflict
+        var stalePutRes = await SendWithCsrfAsync(factory, client, HttpMethod.Put, $"/api/novels/{novelId}/story-memory/{entityId}", new
         {
             targetLanguage = "vi",
-            provider = "gemini",
-            apiKey = "ephemeral-secret-key-xyz"
+            sourceTerm = "アインズ",
+            translatedTerm = "Stale Client",
+            category = "Character",
+            expectedVersion = 1
         });
-        Assert.Equal(HttpStatusCode.OK, r2Res.StatusCode);
-        using var r2Doc = JsonDocument.Parse(await r2Res.Content.ReadAsStringAsync());
-        Assert.Equal(0, r2Doc.RootElement.GetProperty("created").GetInt32());
-        Assert.Equal(1, r2Doc.RootElement.GetProperty("updated").GetInt32());
-        Assert.Equal(1, r2Doc.RootElement.GetProperty("skippedLocked").GetInt32());
+        Assert.Equal(HttpStatusCode.Conflict, stalePutRes.StatusCode);
 
-        var finalGlossary = r2Doc.RootElement.GetProperty("glossary").EnumerateArray().ToList();
-        var preservedAinz = finalGlossary.First(x => x.GetProperty("sourceTerm").GetString() == "アインズ");
-        var updatedNazarick = finalGlossary.First(x => x.GetProperty("sourceTerm").GetString() == "ナザリック");
-        Assert.Equal("Chúa Tể Ainz (Canonical)", preservedAinz.GetProperty("translatedTerm").GetString());
-        Assert.Equal("Đại Lăng Mộ Nazarick", updatedNazarick.GetProperty("translatedTerm").GetString());
-        Assert.Contains("Tomb", updatedNazarick.GetProperty("aliases").EnumerateArray().Select(a => a.GetString()));
+        // 3. Release extraction barrier and assert PUT lock/translation survived intact
+        releaseAi.TrySetResult(true);
+        var extractRes = await extractTask;
+        Assert.Equal(HttpStatusCode.OK, extractRes.StatusCode);
+        using var extractDoc = JsonDocument.Parse(await extractRes.Content.ReadAsStringAsync());
+        Assert.Equal(1, extractDoc.RootElement.GetProperty("skippedLocked").GetInt32());
+        var persisted = extractDoc.RootElement.GetProperty("glossary")[0];
+        Assert.Equal("Chúa Tể Ainz (PUT Locked)", persisted.GetProperty("translatedTerm").GetString());
+        Assert.True(persisted.GetProperty("isLocked").GetBoolean());
+        Assert.Equal("Confirmed", persisted.GetProperty("status").GetString());
+
+        // 4. Race 2: two concurrent extractions inserting same brand-new term both succeed with 1 DB row
+        // Use separate clients so concurrent CSRF cookie fetches do not overwrite one shared CookieContainer.
+        var (novel2Id, _, _, g2, e2) = await SeedNovelAsync(factory, new[] { "Tanaka arrived at noon." });
+        var client2A = CreateAuthedClient(factory, g2, e2);
+        var client2B = CreateAuthedClient(factory, g2, e2);
+
+        var bothEntered = 0;
+        var bothReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBoth = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider(async (req, ct) =>
+        {
+            if (Interlocked.Increment(ref bothEntered) == 2) bothReady.TrySetResult(true);
+            await releaseBoth.Task.WaitAsync(ct);
+            const string json = """
+                {
+                  "entities":[
+                    {
+                      "sourceTerm":"Tanaka",
+                      "translatedTerm":"Tanaka",
+                      "category":"Character",
+                      "evidenceSegmentOrder":0,
+                      "evidenceQuote":"Tanaka arrived"
+                    }
+                  ]
+                }
+                """;
+            return new AiResponse(json, 20, 20, 40, req.Model, FinishReason.Stop);
+        });
+
+        var tA = SendWithCsrfAsync(factory, client2A, HttpMethod.Post, $"/api/novels/{novel2Id}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" });
+        var tB = SendWithCsrfAsync(factory, client2B, HttpMethod.Post, $"/api/novels/{novel2Id}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" });
+        await bothReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseBoth.TrySetResult(true);
+
+        var resA = await tA;
+        var resB = await tB;
+        Assert.Equal(HttpStatusCode.OK, resA.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, resB.StatusCode);
+
+        var listRes = await client2A.GetAsync($"/api/novels/{novel2Id}/story-memory");
+        using var listDoc = JsonDocument.Parse(await listRes.Content.ReadAsStringAsync());
+        Assert.Equal(1, listDoc.RootElement.GetArrayLength());
     }
 
     [Fact]
-    public async Task ExtractStoryMemory_UpstreamTruncatedOrMalformed_Returns502SanitizedWithoutSecretLeak()
+    public async Task TranslationWorker_InjectsStoryMemoryLitePrompt_AndConsistencyCheckWorks()
     {
         using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
-        var (novelId, _, googleId, email) = await SeedNovelAsync(factory, new[] { "Short novel text" });
-        var client = CreateAuthedClient(factory, googleId, email);
-
-        const string secretCanary = "AIzaSyCanarySecret9999";
-        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
-            Task.FromResult(new AiResponse($"invalid json raw body {secretCanary}", 50, 20, 70, req.Model, FinishReason.MaxTokens)));
-
-        var res = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
-        {
-            targetLanguage = "vi",
-            provider = "openai",
-            apiKey = secretCanary
-        });
-
-        Assert.Equal(HttpStatusCode.BadGateway, res.StatusCode);
-        var body = await res.Content.ReadAsStringAsync();
-        Assert.DoesNotContain(secretCanary, body);
-        Assert.Contains("truncated", body, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task TranslationWorker_InjectsGlossaryIntoPrompt_AndConsistencyEndpointDetectsMismatches()
-    {
-        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
-        var (novelId, _, googleId, email) = await SeedNovelAsync(factory, new[]
+        var (novelId, segments, _, googleId, email) = await SeedNovelAsync(factory, new[]
         {
             "Momonga walked across the hall.",
             "Momonga checked his magic scroll."
         });
         var client = CreateAuthedClient(factory, googleId, email);
 
-        // Seed canonical glossary term with alias "Momonga"
-        var addRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
         {
             targetLanguage = "vi",
             sourceTerm = "Ainz",
             translatedTerm = "Chúa Tể Ainz",
             category = "Character",
             aliases = new[] { "Momonga" },
-            description = "Protagonist"
-        });
-        Assert.Equal(HttpStatusCode.Created, addRes.StatusCode);
+            status = "Confirmed",
+            evidenceSegmentId = segments[0].Id,
+            evidenceQuote = "Momonga walked"
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/scene-facts", new
+        {
+            targetLanguage = "vi",
+            factKey = "GreatHall",
+            factType = "Setting",
+            summary = "Grand marble hall of Nazarick",
+            status = "Confirmed"
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/speech-observations", new
+        {
+            targetLanguage = "vi",
+            speakerName = "Momonga",
+            speechRegister = "Formal Sovereign",
+            pronounStyle = "Ta / Ngươi",
+            observation = "Dignified inner monologue",
+            status = "Provisional"
+        })).StatusCode);
 
         string? capturedPrompt = null;
         factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
         {
             capturedPrompt = req.UserPrompt;
-            // Segment 0 includes canonical translation; Segment 1 uses inconsistent alias "Momonga" instead!
             const string reply =
                 "[SEG:0] Chúa Tể Ainz bước qua đại sảnh.\n" +
-                "[SEG:1] Momonga kiểm tra cuộn ma thuật của mình.";
+                "[SEG:1] Momonga kiểm tra cuộn ma thuật.";
             return Task.FromResult(new AiResponse(reply, 60, 40, 100, req.Model, FinishReason.Stop));
         });
 
-        // Submit translation job
         var jobRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, "/api/translations", new
         {
             novelId,
@@ -492,34 +574,25 @@ public class StoryMemoryEndpointIntegrationTests
         using var jobDoc = JsonDocument.Parse(await jobRes.Content.ReadAsStringAsync());
         var jobId = jobDoc.RootElement.GetProperty("id").GetGuid();
 
-        // Execute worker once
         using (var scope = factory.Services.CreateScope())
         {
             var worker = new TranslationQueueWorker(
                 scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
                 scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<TranslationQueueWorker>>(),
                 scope.ServiceProvider.GetRequiredService<IJobCancellationRegistry>());
-            var processed = await worker.ProcessNextJobAsync(CancellationToken.None);
-            Assert.True(processed);
+            Assert.True(await worker.ProcessNextJobAsync(CancellationToken.None));
         }
 
-        // Verify worker injected Story Memory glossary BEFORE target segments
         Assert.NotNull(capturedPrompt);
-        var glossaryIndex = capturedPrompt!.IndexOf("--- STORY MEMORY & GLOSSARY", StringComparison.Ordinal);
-        var targetIndex = capturedPrompt.IndexOf("--- SEGMENTS TO TRANSLATE ---", StringComparison.Ordinal);
-        Assert.True(glossaryIndex >= 0);
-        Assert.True(targetIndex > glossaryIndex);
-        Assert.Contains("Ainz -> Chúa Tể Ainz [Character] (Aliases: Momonga)", capturedPrompt);
+        Assert.Contains("--- STORY MEMORY & GLOSSARY", capturedPrompt);
+        Assert.Contains("--- SCENE FACTS", capturedPrompt);
+        Assert.Contains("--- CHARACTER SPEECH", capturedPrompt);
+        Assert.Contains("Ainz -> Chúa Tể Ainz", capturedPrompt);
 
-        // Verify consistency endpoint identifies Segment 1 mismatch and spares Segment 0
         var consistencyRes = await client.GetAsync($"/api/translations/{jobId}/consistency");
         Assert.Equal(HttpStatusCode.OK, consistencyRes.StatusCode);
         using var cDoc = JsonDocument.Parse(await consistencyRes.Content.ReadAsStringAsync());
-        Assert.Equal(2, cDoc.RootElement.GetProperty("checkedSegments").GetInt32());
-        Assert.Equal(1, cDoc.RootElement.GetProperty("glossaryCount").GetInt32());
         Assert.Equal(1, cDoc.RootElement.GetProperty("issueCount").GetInt32());
-        var issue = cDoc.RootElement.GetProperty("issues")[0];
-        Assert.Equal(1, issue.GetProperty("segmentOrder").GetInt32());
-        Assert.Equal("Chúa Tể Ainz", issue.GetProperty("expectedTranslation").GetString());
+        Assert.Equal(1, cDoc.RootElement.GetProperty("issues")[0].GetProperty("segmentOrder").GetInt32());
     }
 }

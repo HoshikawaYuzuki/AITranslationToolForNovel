@@ -140,19 +140,27 @@ public class MockAiProvider : IAiProvider
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var entities = new List<object>();
+        var sceneFacts = new List<object>();
+        var speechObservations = new List<object>();
 
-        foreach (System.Text.RegularExpressions.Match segMatch in System.Text.RegularExpressions.Regex.Matches(
-                     slice,
-                     @"\[SEG:(\d+)\]\s*([^\r\n]+)"))
+        var segRegex = new System.Text.RegularExpressions.Regex(
+            @"\[SEG:(\d+)(?:\s*\|\s*ID:([^\]]+))?\]\s*([^\r\n]+)");
+        var segMatches = segRegex.Matches(slice);
+
+        foreach (System.Text.RegularExpressions.Match segMatch in segMatches)
         {
             if (!int.TryParse(segMatch.Groups[1].Value, out var order)) order = 0;
-            var text = segMatch.Groups[2].Value.Trim();
+            var stableId = string.IsNullOrWhiteSpace(segMatch.Groups[2].Value) ? null : segMatch.Groups[2].Value.Trim();
+            var text = segMatch.Groups[3].Value.Trim();
+            var quote = text.Length > 100 ? text[..100] : text;
+            string? firstSpeakerInSeg = null;
 
             foreach (System.Text.RegularExpressions.Match quoted in System.Text.RegularExpressions.Regex.Matches(
                          text,
                          @"[「『""]([^{}「」『""\r\n]{2,32})[」』""]"))
             {
                 var term = quoted.Groups[1].Value.Trim();
+                firstSpeakerInSeg ??= term;
                 if (seen.Add(term))
                 {
                     entities.Add(new
@@ -162,7 +170,9 @@ public class MockAiProvider : IAiProvider
                         category = "Character",
                         aliases = Array.Empty<string>(),
                         description = "Mock extracted proper term.",
-                        firstSeenOrder = order
+                        evidenceSegmentOrder = order,
+                        evidenceSegmentStableId = stableId,
+                        evidenceQuote = quote
                     });
                 }
             }
@@ -173,6 +183,7 @@ public class MockAiProvider : IAiProvider
             {
                 var term = prop.Groups[1].Value.Trim();
                 if (term is "The" or "This" or "That" or "There" or "When" or "After" or "Before") continue;
+                firstSpeakerInSeg ??= term;
                 if (seen.Add(term))
                 {
                     entities.Add(new
@@ -182,30 +193,71 @@ public class MockAiProvider : IAiProvider
                         category = "Character",
                         aliases = Array.Empty<string>(),
                         description = "Mock extracted proper noun.",
-                        firstSeenOrder = order
+                        evidenceSegmentOrder = order,
+                        evidenceSegmentStableId = stableId,
+                        evidenceQuote = quote
                     });
                 }
             }
-        }
 
-        if (entities.Count == 0)
-        {
-            var firstSeg = System.Text.RegularExpressions.Regex.Match(slice, @"\[SEG:(\d+)\]\s*([^\r\n]+)");
-            var firstOrder = firstSeg.Success && int.TryParse(firstSeg.Groups[1].Value, out var o) ? o : 0;
-            var sample = firstSeg.Success
-                ? firstSeg.Groups[2].Value.Trim().Split(new[] { ' ', '　', '。', '.' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "Protagonist"
-                : "Protagonist";
-            entities.Add(new
+            if (sceneFacts.Count == 0 && !string.IsNullOrWhiteSpace(text))
             {
-                sourceTerm = sample,
-                translatedTerm = $"[{targetLang}] {sample}",
-                category = "Concept",
-                aliases = Array.Empty<string>(),
-                description = "Deterministic mock fallback entity.",
-                firstSeenOrder = firstOrder
-            });
+                sceneFacts.Add(new
+                {
+                    factKey = $"SceneSeg{order}",
+                    factType = "EventState",
+                    summary = $"Scene event grounded in segment {order}.",
+                    evidenceSegmentOrder = order,
+                    evidenceSegmentStableId = stableId,
+                    evidenceQuote = quote
+                });
+            }
+
+            if (firstSpeakerInSeg != null && speechObservations.Count < 3)
+            {
+                speechObservations.Add(new
+                {
+                    speakerName = firstSpeakerInSeg,
+                    addresseeName = (string?)null,
+                    speechRegister = "Neutral",
+                    pronounStyle = (string?)null,
+                    observation = $"Observed speech context in segment {order}.",
+                    evidenceSegmentOrder = order,
+                    evidenceSegmentStableId = stableId,
+                    evidenceQuote = quote
+                });
+            }
         }
 
-        return System.Text.Json.JsonSerializer.Serialize(new { entities = entities.Take(10) });
+        if (entities.Count == 0 && segMatches.Count > 0)
+        {
+            var firstSeg = segMatches[0];
+            var firstOrder = int.TryParse(firstSeg.Groups[1].Value, out var o) ? o : 0;
+            var firstStableId = string.IsNullOrWhiteSpace(firstSeg.Groups[2].Value) ? null : firstSeg.Groups[2].Value.Trim();
+            var segText = firstSeg.Groups[3].Value.Trim();
+            var quote = segText.Length > 100 ? segText[..100] : segText;
+            var sample = segText.Split(new[] { ' ', '　', '。', '.', '、', ',' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? quote;
+            if (!string.IsNullOrWhiteSpace(sample))
+            {
+                entities.Add(new
+                {
+                    sourceTerm = sample,
+                    translatedTerm = $"[{targetLang}] {sample}",
+                    category = "Concept",
+                    aliases = Array.Empty<string>(),
+                    description = "Deterministic mock entity from source segment.",
+                    evidenceSegmentOrder = firstOrder,
+                    evidenceSegmentStableId = firstStableId,
+                    evidenceQuote = quote
+                });
+            }
+        }
+
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            entities = entities.Take(10),
+            sceneFacts = sceneFacts.Take(5),
+            speechObservations = speechObservations.Take(5)
+        });
     }
 }

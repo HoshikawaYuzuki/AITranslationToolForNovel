@@ -20,6 +20,8 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
     public DbSet<TranslationJob> TranslationJobs => Set<TranslationJob>();
     public DbSet<TranslatedSegment> TranslatedSegments => Set<TranslatedSegment>();
     public DbSet<StoryEntity> StoryEntities => Set<StoryEntity>();
+    public DbSet<SceneFact> SceneFacts => Set<SceneFact>();
+    public DbSet<SpeechObservation> SpeechObservations => Set<SpeechObservation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -125,7 +127,12 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
             b.Property(e => e.TranslatedTerm).HasMaxLength(256).IsRequired();
             b.Property(e => e.Category).HasConversion<string>().HasMaxLength(32).IsRequired();
             b.Property(e => e.Origin).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(e => e.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(e => e.ConflictDetails).HasMaxLength(1000);
             b.Property(e => e.Description).HasMaxLength(1000);
+            b.Property(e => e.EvidenceSegmentStableId).HasMaxLength(64);
+            b.Property(e => e.EvidenceQuote).HasMaxLength(500);
+            b.Property(e => e.Version).IsConcurrencyToken().HasDefaultValue(1).IsRequired();
             b.Property(e => e.Aliases)
              .HasConversion(stringListConverter, stringListComparer)
              .HasColumnType("jsonb");
@@ -141,6 +148,79 @@ public class BasiDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Gui
              .WithMany(n => n.StoryEntities)
              .HasForeignKey(e => e.NovelId)
              .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(e => e.EvidenceSegment)
+             .WithMany()
+             .HasForeignKey(e => e.EvidenceSegmentId)
+             .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // ---- SceneFact (BASI-004 Story Memory Lite) ----
+        modelBuilder.Entity<SceneFact>(b =>
+        {
+            b.HasKey(f => f.Id);
+            b.Property(f => f.TargetLanguage).HasMaxLength(32).IsRequired();
+            b.Property(f => f.FactKey).HasMaxLength(256).IsRequired();
+            b.Property(f => f.NormalizedFactKey).HasMaxLength(256).IsRequired();
+            b.Property(f => f.FactType).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(f => f.Summary).HasMaxLength(1000).IsRequired();
+            b.Property(f => f.Origin).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(f => f.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(f => f.ConflictDetails).HasMaxLength(1000);
+            b.Property(f => f.EvidenceSegmentStableId).HasMaxLength(64);
+            b.Property(f => f.EvidenceQuote).HasMaxLength(500);
+            b.Property(f => f.Version).IsConcurrencyToken().HasDefaultValue(1).IsRequired();
+            b.Property(f => f.CreatedAt).HasDefaultValueSql("now()");
+            b.Property(f => f.UpdatedAt).HasDefaultValueSql("now()");
+            b.HasIndex(f => new { f.NovelId, f.TargetLanguage, f.NormalizedFactKey }).IsUnique();
+            b.HasIndex(f => f.OwnerId);
+            b.HasOne<ApplicationUser>()
+             .WithMany()
+             .HasForeignKey(f => f.OwnerId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(f => f.Novel)
+             .WithMany(n => n.SceneFacts)
+             .HasForeignKey(f => f.NovelId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(f => f.EvidenceSegment)
+             .WithMany()
+             .HasForeignKey(f => f.EvidenceSegmentId)
+             .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // ---- SpeechObservation (BASI-004 Story Memory Lite) ----
+        modelBuilder.Entity<SpeechObservation>(b =>
+        {
+            b.HasKey(o => o.Id);
+            b.Property(o => o.TargetLanguage).HasMaxLength(32).IsRequired();
+            b.Property(o => o.SpeakerName).HasMaxLength(256).IsRequired();
+            b.Property(o => o.NormalizedSpeakerName).HasMaxLength(256).IsRequired();
+            b.Property(o => o.AddresseeName).HasMaxLength(256);
+            b.Property(o => o.NormalizedAddresseeName).HasMaxLength(256).IsRequired();
+            b.Property(o => o.SpeechRegister).HasMaxLength(128).IsRequired();
+            b.Property(o => o.PronounStyle).HasMaxLength(256);
+            b.Property(o => o.Observation).HasMaxLength(1000).IsRequired();
+            b.Property(o => o.Origin).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(o => o.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+            b.Property(o => o.ConflictDetails).HasMaxLength(1000);
+            b.Property(o => o.EvidenceSegmentStableId).HasMaxLength(64);
+            b.Property(o => o.EvidenceQuote).HasMaxLength(500);
+            b.Property(o => o.Version).IsConcurrencyToken().HasDefaultValue(1).IsRequired();
+            b.Property(o => o.CreatedAt).HasDefaultValueSql("now()");
+            b.Property(o => o.UpdatedAt).HasDefaultValueSql("now()");
+            b.HasIndex(o => new { o.NovelId, o.TargetLanguage, o.NormalizedSpeakerName, o.NormalizedAddresseeName }).IsUnique();
+            b.HasIndex(o => o.OwnerId);
+            b.HasOne<ApplicationUser>()
+             .WithMany()
+             .HasForeignKey(o => o.OwnerId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(o => o.Novel)
+             .WithMany(n => n.SpeechObservations)
+             .HasForeignKey(o => o.NovelId)
+             .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne(o => o.EvidenceSegment)
+             .WithMany()
+             .HasForeignKey(o => o.EvidenceSegmentId)
+             .OnDelete(DeleteBehavior.SetNull);
         });
     }
 }

@@ -5,16 +5,51 @@ using Basi.Core.Models;
 
 namespace Basi.Module.StoryMemory.Services;
 
+public sealed record SourceSegmentInput(
+    Guid Id,
+    string StableId,
+    int Order,
+    string Content);
+
 public sealed record ExtractedEntityCandidate(
     string SourceTerm,
+    string NormalizedSourceTerm,
     string TranslatedTerm,
     StoryEntityCategory Category,
     List<string> Aliases,
     string? Description,
-    int? FirstSeenOrder);
+    Guid EvidenceSegmentId,
+    string EvidenceSegmentStableId,
+    int EvidenceSegmentOrder,
+    string? EvidenceQuote);
+
+public sealed record ExtractedSceneFactCandidate(
+    string FactKey,
+    string NormalizedFactKey,
+    SceneFactType FactType,
+    string Summary,
+    Guid EvidenceSegmentId,
+    string EvidenceSegmentStableId,
+    int EvidenceSegmentOrder,
+    string? EvidenceQuote);
+
+public sealed record ExtractedSpeechObservationCandidate(
+    string SpeakerName,
+    string NormalizedSpeakerName,
+    string? AddresseeName,
+    string NormalizedAddresseeName,
+    string SpeechRegister,
+    string? PronounStyle,
+    string Observation,
+    Guid EvidenceSegmentId,
+    string EvidenceSegmentStableId,
+    int EvidenceSegmentOrder,
+    string? EvidenceQuote);
 
 public sealed record StoryMemoryExtractionResult(
-    IReadOnlyList<ExtractedEntityCandidate> Candidates,
+    IReadOnlyList<ExtractedEntityCandidate> Entities,
+    IReadOnlyList<ExtractedSceneFactCandidate> SceneFacts,
+    IReadOnlyList<ExtractedSpeechObservationCandidate> SpeechObservations,
     int PromptTokens,
     int CompletionTokens,
     int TotalTokens,
@@ -49,13 +84,14 @@ public interface IStoryMemoryExtractor
         string model,
         string sourceLanguage,
         string targetLanguage,
-        IReadOnlyList<(int Order, string Content)> segments,
+        IReadOnlyList<SourceSegmentInput> segments,
         IReadOnlyList<StoryEntity>? existingEntities = null,
         CancellationToken ct = default);
 }
 
 /// <summary>
-/// Builds structured entity/glossary extraction prompts, calls IAiProvider, and validates strict JSON responses.
+/// Builds structured Story Memory Lite extraction prompts, calls IAiProvider,
+/// strictly validates JSON schema, Unicode bounds, and source segment/quote evidence.
 /// </summary>
 public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
 {
@@ -68,7 +104,7 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
         string model,
         string sourceLanguage,
         string targetLanguage,
-        IReadOnlyList<(int Order, string Content)> segments,
+        IReadOnlyList<SourceSegmentInput> segments,
         IReadOnlyList<StoryEntity>? existingEntities = null,
         CancellationToken ct = default)
     {
@@ -80,7 +116,11 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
 
         if (segments.Count == 0)
         {
-            return new StoryMemoryExtractionResult(Array.Empty<ExtractedEntityCandidate>(), 0, 0, 0, model);
+            return new StoryMemoryExtractionResult(
+                Array.Empty<ExtractedEntityCandidate>(),
+                Array.Empty<ExtractedSceneFactCandidate>(),
+                Array.Empty<ExtractedSpeechObservationCandidate>(),
+                0, 0, 0, model);
         }
 
         if (segments.Count > MaxExtractionSegments)
@@ -138,37 +178,40 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                 response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
         }
 
-        IReadOnlyList<ExtractedEntityCandidate> candidates;
         try
         {
-            candidates = ParseResponse(response.Content);
+            var (entities, sceneFacts, speechObservations) = ParseAndValidateResponse(response.Content, segments);
+            return new StoryMemoryExtractionResult(
+                entities,
+                sceneFacts,
+                speechObservations,
+                response.PromptTokens,
+                response.CompletionTokens,
+                response.TotalTokens,
+                response.ModelUsed);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             throw new StoryMemoryExtractionException(
-                $"Model returned invalid story memory JSON: {ex.Message}",
+                $"Invalid story memory schema or ungrounded evidence: {ex.Message}",
                 response.PromptTokens, response.CompletionTokens, response.TotalTokens, response.ModelUsed);
         }
-
-        return new StoryMemoryExtractionResult(
-            candidates,
-            response.PromptTokens,
-            response.CompletionTokens,
-            response.TotalTokens,
-            response.ModelUsed);
     }
 
     internal static (string SystemPrompt, string UserPrompt) BuildPrompt(
         string sourceLanguage,
         string targetLanguage,
-        IReadOnlyList<(int Order, string Content)> segments,
+        IReadOnlyList<SourceSegmentInput> segments,
         IReadOnlyList<StoryEntity>? existingEntities = null)
     {
         var systemPrompt =
-            $"You are an expert literary story-bible and terminology analyst for {sourceLanguage} -> {targetLanguage} novel translation.\n" +
-            $"Extract recurring proper nouns, character names, locations, skills/abilities, items, organizations, concepts, and honorific terms.\n" +
-            $"Return STRICT JSON ONLY with no surrounding prose, using this exact schema:\n" +
-            $"{{\"entities\":[{{\"sourceTerm\":\"string\",\"translatedTerm\":\"string\",\"category\":\"Character|Location|Skill|Item|Organization|Concept|Honorific|Other\",\"aliases\":[\"string\"],\"description\":\"string\",\"firstSeenOrder\":0}}]}}";
+            $"You are an expert literary story-bible analyst for {sourceLanguage} -> {targetLanguage} novel translation.\n" +
+            $"Extract: (1) recurring entities/glossary terms, (2) scene continuity facts, and (3) character speech/register observations.\n" +
+            $"Every item MUST cite its exact evidence segment (`evidenceSegmentOrder` / `evidenceSegmentStableId` from the supplied segments) and an exact supporting `evidenceQuote` copied from that segment.\n" +
+            $"Return STRICT JSON ONLY with no prose outside the JSON object:\n" +
+            $"{{\"entities\":[{{\"sourceTerm\":\"string\",\"translatedTerm\":\"string\",\"category\":\"Character|Location|Skill|Item|Organization|Concept|Honorific|Other\",\"aliases\":[\"string\"],\"description\":\"string|null\",\"evidenceSegmentOrder\":0,\"evidenceSegmentStableId\":\"string\",\"evidenceQuote\":\"string\"}}]," +
+            $"\"sceneFacts\":[{{\"factKey\":\"string\",\"factType\":\"Setting|Time|PresentCharacters|EventState|Other\",\"summary\":\"string\",\"evidenceSegmentOrder\":0,\"evidenceSegmentStableId\":\"string\",\"evidenceQuote\":\"string\"}}]," +
+            $"\"speechObservations\":[{{\"speakerName\":\"string\",\"addresseeName\":\"string|null\",\"speechRegister\":\"string\",\"pronounStyle\":\"string|null\",\"observation\":\"string\",\"evidenceSegmentOrder\":0,\"evidenceSegmentStableId\":\"string\",\"evidenceQuote\":\"string\"}}]}}";
 
         var sb = new StringBuilder();
         sb.AppendLine("--- STORY MEMORY EXTRACTION ---");
@@ -178,7 +221,7 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
 
         if (existingEntities != null && existingEntities.Count > 0)
         {
-            sb.AppendLine("--- EXISTING GLOSSARY TERMS (KEEP CONSISTENT; ADD ONLY NEW TERMS OR MISSING ALIASES) ---");
+            sb.AppendLine("--- EXISTING GLOSSARY TERMS (KEEP CONSISTENT; ONLY REPORT GENUINELY EVIDENCED ITEMS) ---");
             foreach (var existing in existingEntities.Take(MaxExistingHints))
             {
                 sb.AppendLine($"- {StoryEntityNormalizer.SanitizeForPrompt(existing.SourceTerm)} -> {StoryEntityNormalizer.SanitizeForPrompt(existing.TranslatedTerm)} [{existing.Category}]");
@@ -187,93 +230,313 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
         }
 
         sb.AppendLine("--- NOVEL SEGMENTS ---");
-        foreach (var (order, content) in segments)
+        foreach (var seg in segments)
         {
-            if (!string.IsNullOrWhiteSpace(content))
+            if (!string.IsNullOrWhiteSpace(seg.Content))
             {
-                sb.AppendLine($"[SEG:{order}] {content.Trim()}");
+                sb.AppendLine($"[SEG:{seg.Order} | ID:{seg.StableId}] {seg.Content.Trim()}");
             }
         }
 
         return (systemPrompt, sb.ToString().TrimEnd());
     }
 
-    internal static IReadOnlyList<ExtractedEntityCandidate> ParseResponse(string content)
+    internal static (
+        IReadOnlyList<ExtractedEntityCandidate> Entities,
+        IReadOnlyList<ExtractedSceneFactCandidate> SceneFacts,
+        IReadOnlyList<ExtractedSpeechObservationCandidate> SpeechObservations)
+        ParseAndValidateResponse(string content, IReadOnlyList<SourceSegmentInput> suppliedSegments)
     {
         if (string.IsNullOrWhiteSpace(content))
         {
             throw new InvalidOperationException("Extraction response was empty.");
         }
 
-        var jsonText = ExtractJsonPayload(content);
+        var byOrder = suppliedSegments.ToDictionary(s => s.Order);
+        var byStableId = suppliedSegments
+            .Where(s => !string.IsNullOrWhiteSpace(s.StableId))
+            .ToDictionary(s => s.StableId, StringComparer.OrdinalIgnoreCase);
+
+        var jsonText = ExtractJsonObjectPayload(content);
         using var doc = JsonDocument.Parse(jsonText);
-
-        JsonElement entitiesArray;
-        if (doc.RootElement.ValueKind == JsonValueKind.Object)
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
         {
-            if (!doc.RootElement.TryGetProperty("entities", out entitiesArray) || entitiesArray.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Root JSON value must be an object containing an 'entities' array.");
+        }
+
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("entities", out var entitiesEl) || entitiesEl.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("Root JSON object must include an 'entities' array.");
+        }
+
+        var entitiesByKey = new Dictionary<string, ExtractedEntityCandidate>(StringComparer.Ordinal);
+        foreach (var item in entitiesEl.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
             {
-                throw new InvalidOperationException("JSON object must contain an 'entities' array.");
-            }
-        }
-        else if (doc.RootElement.ValueKind == JsonValueKind.Array)
-        {
-            entitiesArray = doc.RootElement;
-        }
-        else
-        {
-            throw new InvalidOperationException("Root JSON value must be an object with 'entities' or an array.");
-        }
-
-        var byKey = new Dictionary<string, ExtractedEntityCandidate>(StringComparer.Ordinal);
-        foreach (var el in entitiesArray.EnumerateArray())
-        {
-            if (el.ValueKind != JsonValueKind.Object) continue;
-
-            var sourceRaw = ReadOptionalString(el, "sourceTerm");
-            var translatedRaw = ReadOptionalString(el, "translatedTerm");
-            var sourceTerm = StoryEntityNormalizer.NormalizeDisplayTerm(sourceRaw);
-            var translatedTerm = StoryEntityNormalizer.NormalizeDisplayTerm(translatedRaw);
-            if (string.IsNullOrWhiteSpace(sourceTerm) || string.IsNullOrWhiteSpace(translatedTerm))
-            {
-                continue;
+                throw new InvalidOperationException("Every element in 'entities' must be a JSON object.");
             }
 
-            var key = StoryEntityNormalizer.NormalizeKey(sourceTerm);
-            var category = StoryEntityNormalizer.ParseCategoryLenient(ReadOptionalString(el, "category"));
-            var description = StoryEntityNormalizer.NormalizeDescription(ReadOptionalString(el, "description"));
-            var rawAliases = ReadStringArray(el, "aliases");
-            var aliases = StoryEntityNormalizer.NormalizeAliases(sourceTerm, rawAliases);
-            int? firstSeenOrder = el.TryGetProperty("firstSeenOrder", out var ordEl) && ordEl.ValueKind == JsonValueKind.Number && ordEl.TryGetInt32(out var ordVal) && ordVal >= 0
-                ? ordVal
-                : null;
-
-            if (byKey.TryGetValue(key, out var existing))
+            var sourceRaw = ReadRequiredString(item, "sourceTerm", "entities");
+            var translatedRaw = ReadRequiredString(item, "translatedTerm", "entities");
+            if (!StoryEntityNormalizer.TryValidateTerm(sourceRaw, "entities.sourceTerm", out var sourceTerm, out var normSource, out var err1))
             {
-                var mergedAliases = StoryEntityNormalizer.NormalizeAliases(existing.SourceTerm, existing.Aliases.Concat(aliases));
-                byKey[key] = existing with
+                throw new InvalidOperationException(err1);
+            }
+            if (!StoryEntityNormalizer.TryValidateTerm(translatedRaw, "entities.translatedTerm", out var translatedTerm, out _, out var err2))
+            {
+                throw new InvalidOperationException(err2);
+            }
+
+            var categoryRaw = ReadRequiredString(item, "category", "entities");
+            if (!StoryEntityNormalizer.TryParseCategory(categoryRaw, out var category))
+            {
+                throw new InvalidOperationException($"Invalid entity category '{categoryRaw}'.");
+            }
+
+            var rawAliases = ReadStrictOptionalStringArray(item, "aliases", "entities");
+            if (!StoryEntityNormalizer.TryValidateAliases(sourceTerm, rawAliases, out var aliases, out var aliasErr))
+            {
+                throw new InvalidOperationException(aliasErr);
+            }
+
+            var descRaw = ReadStrictOptionalString(item, "description", "entities");
+            if (!StoryEntityNormalizer.TryValidateOptionalText(descRaw, "entities.description", StoryEntityNormalizer.MaxDescriptionLength, out var description, out var descErr))
+            {
+                throw new InvalidOperationException(descErr);
+            }
+
+            var (evidenceSeg, quote) = ResolveAndValidateEvidence(item, "entities", byOrder, byStableId);
+
+            // Grounding check: entity sourceTerm or one of its aliases must occur in the referenced evidence segment
+            var normSegContent = StoryEntityNormalizer.NormalizeKey(evidenceSeg.Content);
+            var termMatched = StoryMemorySelector.MatchesNormalizedTerm(normSegContent, normSource)
+                || aliases.Any(a => StoryMemorySelector.MatchesNormalizedTerm(normSegContent, StoryEntityNormalizer.NormalizeKey(a)));
+            if (!termMatched)
+            {
+                throw new InvalidOperationException($"Entity '{sourceTerm}' was not found in referenced segment order {evidenceSeg.Order}.");
+            }
+
+            if (entitiesByKey.TryGetValue(normSource, out var existing))
+            {
+                if (!StoryEntityNormalizer.TryValidateAliases(existing.SourceTerm, existing.Aliases.Concat(aliases), out var mergedAliases, out var mergeAliasErr))
+                {
+                    throw new InvalidOperationException(mergeAliasErr);
+                }
+                entitiesByKey[normSource] = existing with
                 {
                     Aliases = mergedAliases,
-                    Description = existing.Description ?? description,
-                    FirstSeenOrder = existing.FirstSeenOrder ?? firstSeenOrder
+                    Description = existing.Description ?? description
                 };
             }
             else
             {
-                byKey[key] = new ExtractedEntityCandidate(
+                entitiesByKey[normSource] = new ExtractedEntityCandidate(
                     sourceTerm,
+                    normSource,
                     translatedTerm,
                     category,
                     aliases,
                     description,
-                    firstSeenOrder);
+                    evidenceSeg.Id,
+                    evidenceSeg.StableId,
+                    evidenceSeg.Order,
+                    quote);
             }
         }
 
-        return byKey.Values.ToList();
+        var sceneFactsByKey = new Dictionary<string, ExtractedSceneFactCandidate>(StringComparer.Ordinal);
+        if (root.TryGetProperty("sceneFacts", out var factsEl))
+        {
+            if (factsEl.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException("'sceneFacts' must be a JSON array when present.");
+            }
+
+            foreach (var item in factsEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException("Every element in 'sceneFacts' must be a JSON object.");
+                }
+
+                var keyRaw = ReadRequiredString(item, "factKey", "sceneFacts");
+                if (!StoryEntityNormalizer.TryValidateTerm(keyRaw, "sceneFacts.factKey", out var factKey, out var normFactKey, out var keyErr))
+                {
+                    throw new InvalidOperationException(keyErr);
+                }
+
+                var typeRaw = ReadRequiredString(item, "factType", "sceneFacts");
+                if (!StoryEntityNormalizer.TryParseSceneFactType(typeRaw, out var factType))
+                {
+                    throw new InvalidOperationException($"Invalid scene factType '{typeRaw}'.");
+                }
+
+                var summaryRaw = ReadRequiredString(item, "summary", "sceneFacts");
+                if (!StoryEntityNormalizer.TryValidateOptionalText(summaryRaw, "sceneFacts.summary", StoryEntityNormalizer.MaxDescriptionLength, out var summary, out var sumErr) || string.IsNullOrEmpty(summary))
+                {
+                    throw new InvalidOperationException(sumErr ?? "sceneFacts.summary is required.");
+                }
+
+                var (evidenceSeg, quote) = ResolveAndValidateEvidence(item, "sceneFacts", byOrder, byStableId);
+
+                if (!sceneFactsByKey.ContainsKey(normFactKey))
+                {
+                    sceneFactsByKey[normFactKey] = new ExtractedSceneFactCandidate(
+                        factKey,
+                        normFactKey,
+                        factType,
+                        summary,
+                        evidenceSeg.Id,
+                        evidenceSeg.StableId,
+                        evidenceSeg.Order,
+                        quote);
+                }
+            }
+        }
+
+        var speechByKey = new Dictionary<(string Speaker, string Addressee), ExtractedSpeechObservationCandidate>();
+        if (root.TryGetProperty("speechObservations", out var speechEl))
+        {
+            if (speechEl.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException("'speechObservations' must be a JSON array when present.");
+            }
+
+            foreach (var item in speechEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException("Every element in 'speechObservations' must be a JSON object.");
+                }
+
+                var speakerRaw = ReadRequiredString(item, "speakerName", "speechObservations");
+                if (!StoryEntityNormalizer.TryValidateTerm(speakerRaw, "speechObservations.speakerName", out var speakerName, out var normSpeaker, out var spErr))
+                {
+                    throw new InvalidOperationException(spErr);
+                }
+
+                var addresseeRaw = ReadStrictOptionalString(item, "addresseeName", "speechObservations");
+                string? addresseeName = null;
+                var normAddressee = string.Empty;
+                if (!string.IsNullOrWhiteSpace(addresseeRaw))
+                {
+                    if (!StoryEntityNormalizer.TryValidateTerm(addresseeRaw, "speechObservations.addresseeName", out var validAddressee, out var validNormAddr, out var addrErr))
+                    {
+                        throw new InvalidOperationException(addrErr);
+                    }
+                    addresseeName = validAddressee;
+                    normAddressee = validNormAddr;
+                }
+
+                var regRaw = ReadRequiredString(item, "speechRegister", "speechObservations");
+                if (!StoryEntityNormalizer.TryValidateOptionalText(regRaw, "speechObservations.speechRegister", StoryEntityNormalizer.MaxSpeechRegisterLength, out var register, out var regErr) || string.IsNullOrEmpty(register))
+                {
+                    throw new InvalidOperationException(regErr ?? "speechObservations.speechRegister is required.");
+                }
+
+                var pronounRaw = ReadStrictOptionalString(item, "pronounStyle", "speechObservations");
+                if (!StoryEntityNormalizer.TryValidateOptionalText(pronounRaw, "speechObservations.pronounStyle", StoryEntityNormalizer.MaxTermLength, out var pronounStyle, out var proErr))
+                {
+                    throw new InvalidOperationException(proErr);
+                }
+
+                var obsRaw = ReadRequiredString(item, "observation", "speechObservations");
+                if (!StoryEntityNormalizer.TryValidateOptionalText(obsRaw, "speechObservations.observation", StoryEntityNormalizer.MaxDescriptionLength, out var observation, out var obsErr) || string.IsNullOrEmpty(observation))
+                {
+                    throw new InvalidOperationException(obsErr ?? "speechObservations.observation is required.");
+                }
+
+                var (evidenceSeg, quote) = ResolveAndValidateEvidence(item, "speechObservations", byOrder, byStableId);
+
+                var compositeKey = (normSpeaker, normAddressee);
+                if (!speechByKey.ContainsKey(compositeKey))
+                {
+                    speechByKey[compositeKey] = new ExtractedSpeechObservationCandidate(
+                        speakerName,
+                        normSpeaker,
+                        addresseeName,
+                        normAddressee,
+                        register,
+                        pronounStyle,
+                        observation,
+                        evidenceSeg.Id,
+                        evidenceSeg.StableId,
+                        evidenceSeg.Order,
+                        quote);
+                }
+            }
+        }
+
+        return (entitiesByKey.Values.ToList(), sceneFactsByKey.Values.ToList(), speechByKey.Values.ToList());
     }
 
-    private static string ExtractJsonPayload(string raw)
+    private static (SourceSegmentInput Segment, string? Quote) ResolveAndValidateEvidence(
+        JsonElement item,
+        string section,
+        IReadOnlyDictionary<int, SourceSegmentInput> byOrder,
+        IReadOnlyDictionary<string, SourceSegmentInput> byStableId)
+    {
+        int? order = null;
+        if (item.TryGetProperty("evidenceSegmentOrder", out var ordProp) && ordProp.ValueKind != JsonValueKind.Null)
+        {
+            if (ordProp.ValueKind != JsonValueKind.Number || !ordProp.TryGetInt32(out var ordVal) || ordVal < 0)
+            {
+                throw new InvalidOperationException($"{section}.evidenceSegmentOrder must be a non-negative integer.");
+            }
+            order = ordVal;
+        }
+        else if (item.TryGetProperty("firstSeenOrder", out var legacyOrdProp) && legacyOrdProp.ValueKind != JsonValueKind.Null)
+        {
+            if (legacyOrdProp.ValueKind != JsonValueKind.Number || !legacyOrdProp.TryGetInt32(out var legVal) || legVal < 0)
+            {
+                throw new InvalidOperationException($"{section}.firstSeenOrder must be a non-negative integer.");
+            }
+            order = legVal;
+        }
+
+        var stableId = ReadStrictOptionalString(item, "evidenceSegmentStableId", section);
+
+        if (!order.HasValue && string.IsNullOrWhiteSpace(stableId))
+        {
+            throw new InvalidOperationException($"{section} item must specify evidenceSegmentOrder or evidenceSegmentStableId.");
+        }
+
+        SourceSegmentInput? byOrdSeg = null;
+        if (order.HasValue && !byOrder.TryGetValue(order.Value, out byOrdSeg))
+        {
+            throw new InvalidOperationException($"{section} referenced evidenceSegmentOrder {order.Value} which does not exist in the supplied source window.");
+        }
+
+        SourceSegmentInput? byStableSeg = null;
+        if (!string.IsNullOrWhiteSpace(stableId) && !byStableId.TryGetValue(stableId, out byStableSeg))
+        {
+            throw new InvalidOperationException($"{section} referenced evidenceSegmentStableId '{stableId}' which does not exist in the supplied source window.");
+        }
+
+        if (byOrdSeg != null && byStableSeg != null && byOrdSeg.Id != byStableSeg.Id)
+        {
+            throw new InvalidOperationException($"{section} evidenceSegmentOrder ({order}) and evidenceSegmentStableId ('{stableId}') refer to different segments.");
+        }
+
+        var matched = byOrdSeg ?? byStableSeg!;
+
+        var rawQuote = ReadStrictOptionalString(item, "evidenceQuote", section);
+        if (!StoryEntityNormalizer.TryValidateOptionalText(rawQuote, $"{section}.evidenceQuote", StoryEntityNormalizer.MaxEvidenceQuoteLength, out var cleanQuote, out var qErr))
+        {
+            throw new InvalidOperationException(qErr);
+        }
+
+        if (!string.IsNullOrWhiteSpace(cleanQuote) && !StoryEntityNormalizer.MatchesNormalizedQuote(matched.Content, cleanQuote))
+        {
+            throw new InvalidOperationException($"{section}.evidenceQuote does not match content of segment order {matched.Order}.");
+        }
+
+        return (matched, cleanQuote);
+    }
+
+    private static string ExtractJsonObjectPayload(string raw)
     {
         var trimmed = raw.Trim();
         if (trimmed.StartsWith("```", StringComparison.Ordinal))
@@ -284,41 +547,71 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
             {
                 trimmed = trimmed[(firstNewline + 1)..lastFence].Trim();
             }
+            else
+            {
+                throw new InvalidOperationException("Unterminated markdown JSON fence.");
+            }
         }
 
-        var objStart = trimmed.IndexOf('{');
-        var arrStart = trimmed.IndexOf('[');
-        if (objStart >= 0 && (arrStart < 0 || objStart < arrStart))
+        if (!trimmed.StartsWith('{') || !trimmed.EndsWith('}'))
         {
-            var objEnd = trimmed.LastIndexOf('}');
-            if (objEnd > objStart) return trimmed[objStart..(objEnd + 1)];
-        }
-        else if (arrStart >= 0)
-        {
-            var arrEnd = trimmed.LastIndexOf(']');
-            if (arrEnd > arrStart) return trimmed[arrStart..(arrEnd + 1)];
+            throw new InvalidOperationException("Extraction response must be a valid JSON object.");
         }
 
-        throw new InvalidOperationException("No JSON object or array found in extraction response.");
+        return trimmed;
     }
 
-    private static string? ReadOptionalString(JsonElement obj, string propertyName)
+    private static string ReadRequiredString(JsonElement obj, string propName, string section)
     {
-        if (!obj.TryGetProperty(propertyName, out var prop)) return null;
-        return prop.ValueKind == JsonValueKind.String ? prop.GetString() : null;
+        if (!obj.TryGetProperty(propName, out var prop) || prop.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"{section}.{propName} is required and must be a string.");
+        }
+
+        var val = prop.GetString();
+        if (string.IsNullOrWhiteSpace(val))
+        {
+            throw new InvalidOperationException($"{section}.{propName} cannot be blank.");
+        }
+
+        return val;
     }
 
-    private static IEnumerable<string> ReadStringArray(JsonElement obj, string propertyName)
+    private static string? ReadStrictOptionalString(JsonElement obj, string propName, string section)
     {
-        if (!obj.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
+        if (!obj.TryGetProperty(propName, out var prop) || prop.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (prop.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"{section}.{propName} must be a string or null.");
+        }
+
+        return prop.GetString();
+    }
+
+    private static IReadOnlyList<string> ReadStrictOptionalStringArray(JsonElement obj, string propName, string section)
+    {
+        if (!obj.TryGetProperty(propName, out var prop) || prop.ValueKind == JsonValueKind.Null)
         {
             return Array.Empty<string>();
         }
 
-        var list = new List<string>();
-        foreach (var item in prop.EnumerateArray())
+        if (prop.ValueKind != JsonValueKind.Array)
         {
-            if (item.ValueKind == JsonValueKind.String && item.GetString() is { } s)
+            throw new InvalidOperationException($"{section}.{propName} must be an array of strings.");
+        }
+
+        var list = new List<string>();
+        foreach (var el in prop.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidOperationException($"Every element of {section}.{propName} must be a string.");
+            }
+            if (el.GetString() is { } s)
             {
                 list.Add(s);
             }

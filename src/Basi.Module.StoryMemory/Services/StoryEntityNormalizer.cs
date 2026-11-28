@@ -5,14 +5,16 @@ using Basi.Core.Models;
 namespace Basi.Module.StoryMemory.Services;
 
 /// <summary>
-/// Canonicalizes story memory terms, aliases, categories, and prompt-injected text.
+/// Canonicalizes story memory terms, aliases, quotes, enums, and prompt-injected text with strict Unicode bounds.
 /// </summary>
 public static partial class StoryEntityNormalizer
 {
     public const int MaxTermLength = 256;
-    public const int MaxDescriptionLength = 1000;
     public const int MaxAliasLength = 128;
     public const int MaxAliasCount = 20;
+    public const int MaxDescriptionLength = 1000;
+    public const int MaxEvidenceQuoteLength = 500;
+    public const int MaxSpeechRegisterLength = 128;
 
     public static string NormalizeKey(string? value)
     {
@@ -22,24 +24,115 @@ public static partial class StoryEntityNormalizer
             .ToLowerInvariant();
     }
 
-    public static string NormalizeDisplayTerm(string? value)
+    public static bool ContainsInvalidUtf16Surrogates(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        var collapsed = CollapseWhitespace(value);
-        return collapsed.Length > MaxTermLength ? collapsed[..MaxTermLength] : collapsed;
+        if (string.IsNullOrEmpty(value)) return false;
+
+        for (var i = 0; i < value.Length; i++)
+        {
+            var ch = value[i];
+            if (char.IsHighSurrogate(ch))
+            {
+                if (i + 1 >= value.Length || !char.IsLowSurrogate(value[i + 1]))
+                {
+                    return true;
+                }
+                i++;
+            }
+            else if (char.IsLowSurrogate(ch))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    public static string? NormalizeDescription(string? value)
+    public static bool TryValidateTerm(
+        string? raw,
+        string fieldName,
+        out string displayTerm,
+        out string normalizedKey,
+        out string? error,
+        int maxLength = MaxTermLength)
     {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var collapsed = CollapseWhitespace(value);
-        return collapsed.Length > MaxDescriptionLength ? collapsed[..MaxDescriptionLength] : collapsed;
+        displayTerm = string.Empty;
+        normalizedKey = string.Empty;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            error = $"{fieldName} is required.";
+            return false;
+        }
+
+        if (ContainsInvalidUtf16Surrogates(raw))
+        {
+            error = $"{fieldName} contains unpaired Unicode surrogates.";
+            return false;
+        }
+
+        var collapsed = CollapseWhitespace(raw);
+        var norm = collapsed.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(norm))
+        {
+            error = $"{fieldName} cannot be empty after normalization.";
+            return false;
+        }
+
+        if (collapsed.Length > maxLength || norm.Length > maxLength)
+        {
+            error = $"{fieldName} exceeds maximum allowed length of {maxLength} characters after Unicode normalization (normalized length: {norm.Length}).";
+            return false;
+        }
+
+        displayTerm = collapsed;
+        normalizedKey = norm;
+        return true;
     }
 
-    public static List<string> NormalizeAliases(string canonicalSourceTerm, IEnumerable<string>? aliases)
+    public static bool TryValidateOptionalText(
+        string? raw,
+        string fieldName,
+        int maxLength,
+        out string? normalizedText,
+        out string? error)
     {
-        var result = new List<string>();
-        if (aliases == null) return result;
+        normalizedText = null;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return true;
+        }
+
+        if (ContainsInvalidUtf16Surrogates(raw))
+        {
+            error = $"{fieldName} contains unpaired Unicode surrogates.";
+            return false;
+        }
+
+        var collapsed = CollapseWhitespace(raw);
+        if (collapsed.Length > maxLength)
+        {
+            error = $"{fieldName} must not exceed {maxLength} characters.";
+            return false;
+        }
+
+        normalizedText = collapsed;
+        return true;
+    }
+
+    public static bool TryValidateAliases(
+        string canonicalSourceTerm,
+        IEnumerable<string>? aliases,
+        out List<string> normalizedAliases,
+        out string? error)
+    {
+        normalizedAliases = new List<string>();
+        error = null;
+        if (aliases == null) return true;
 
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var canonicalKey = NormalizeKey(canonicalSourceTerm);
@@ -50,18 +143,36 @@ public static partial class StoryEntityNormalizer
 
         foreach (var raw in aliases)
         {
-            var clean = CollapseWhitespace(raw);
-            if (string.IsNullOrEmpty(clean)) continue;
-            if (clean.Length > MaxAliasLength) clean = clean[..MaxAliasLength];
+            if (string.IsNullOrWhiteSpace(raw)) continue;
 
-            var key = NormalizeKey(clean);
-            if (string.IsNullOrEmpty(key) || !seen.Add(key)) continue;
+            if (!TryValidateTerm(raw, "Alias", out var cleanAlias, out var key, out var aliasError, MaxAliasLength))
+            {
+                error = aliasError;
+                return false;
+            }
 
-            result.Add(clean);
-            if (result.Count >= MaxAliasCount) break;
+            if (!seen.Add(key)) continue;
+
+            normalizedAliases.Add(cleanAlias);
+            if (normalizedAliases.Count > MaxAliasCount)
+            {
+                error = $"Aliases list cannot exceed {MaxAliasCount} distinct entries.";
+                return false;
+            }
         }
 
-        return result;
+        return true;
+    }
+
+    public static bool MatchesNormalizedQuote(string segmentContent, string quote)
+    {
+        var normSeg = NormalizeKey(segmentContent);
+        var normQuote = NormalizeKey(quote);
+        if (string.IsNullOrEmpty(normSeg) || string.IsNullOrEmpty(normQuote))
+        {
+            return false;
+        }
+        return normSeg.Contains(normQuote, StringComparison.Ordinal);
     }
 
     public static bool TryParseCategory(string? raw, out StoryEntityCategory category)
@@ -72,17 +183,57 @@ public static partial class StoryEntityNormalizer
             return true;
         }
 
-        return Enum.TryParse(raw.Trim(), ignoreCase: true, out category)
+        var trimmed = raw.Trim();
+        if (int.TryParse(trimmed, out _))
+        {
+            category = default;
+            return false;
+        }
+
+        return Enum.TryParse(trimmed, ignoreCase: true, out category)
             && Enum.IsDefined(category);
     }
 
-    public static StoryEntityCategory ParseCategoryLenient(string? raw)
+    public static bool TryParseFactStatus(string? raw, out FactStatus status)
     {
-        return TryParseCategory(raw, out var parsed) ? parsed : StoryEntityCategory.Other;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            status = FactStatus.Provisional;
+            return true;
+        }
+
+        var trimmed = raw.Trim();
+        if (int.TryParse(trimmed, out _))
+        {
+            status = default;
+            return false;
+        }
+
+        return Enum.TryParse(trimmed, ignoreCase: true, out status)
+            && Enum.IsDefined(status);
+    }
+
+    public static bool TryParseSceneFactType(string? raw, out SceneFactType factType)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            factType = SceneFactType.Other;
+            return true;
+        }
+
+        var trimmed = raw.Trim();
+        if (int.TryParse(trimmed, out _))
+        {
+            factType = default;
+            return false;
+        }
+
+        return Enum.TryParse(trimmed, ignoreCase: true, out factType)
+            && Enum.IsDefined(factType);
     }
 
     /// <summary>
-    /// Strips [SEG: markers and line breaks before injecting glossary entries into prompts.
+    /// Strips [SEG: markers and line breaks before injecting story memory entries into prompts.
     /// </summary>
     public static string SanitizeForPrompt(string? value)
     {
