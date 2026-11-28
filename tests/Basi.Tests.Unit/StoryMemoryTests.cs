@@ -405,6 +405,70 @@ public class StoryMemoryTests
         Assert.Throws<InvalidOperationException>(() => StoryMemoryExtractor.ParseAndValidateResponse(mismatchedJson, window));
     }
 
+    [Fact]
+    public void Extractor_ParseAndValidate_AtomicEvidenceBundle_UpgradesTogetherWithoutMixingSegments()
+    {
+        var seg0 = Seg(0, "Alice enters the room.");
+        var seg1 = Seg(1, "Alice leaves the castle.");
+        var window = new[] { seg0, seg1 };
+
+        // Exact B004-08 reproduction: candidate 0 has no quote, candidate 1 has quote on segment 1.
+        // Upgrade must move ID/StableId/Order/Quote atomically to segment 1.
+        var upgradeJson = $$"""
+            {
+              "entities":[
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{seg0.StableId}}"},
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{seg1.StableId}}","evidenceQuote":"leaves the castle"}
+              ],
+              "sceneFacts":[
+                {"factKey":"SceneMove","factType":"EventState","summary":"Alice moves","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{seg0.StableId}}"},
+                {"factKey":"SceneMove","factType":"EventState","summary":"Alice moves","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{seg1.StableId}}","evidenceQuote":"leaves the castle"}
+              ],
+              "speechObservations":[
+                {"speakerName":"Alice","speechRegister":"Calm","observation":"Measured tone","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{seg0.StableId}}"},
+                {"speakerName":"Alice","speechRegister":"Calm","observation":"Measured tone","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{seg1.StableId}}","evidenceQuote":"leaves the castle"}
+              ]
+            }
+            """;
+
+        var (entities, facts, speech) = StoryMemoryExtractor.ParseAndValidateResponse(upgradeJson, window);
+        var entity = Assert.Single(entities);
+        Assert.Equal(seg1.Id, entity.EvidenceSegmentId);
+        Assert.Equal(seg1.StableId, entity.EvidenceSegmentStableId);
+        Assert.Equal(1, entity.EvidenceSegmentOrder);
+        Assert.Equal("leaves the castle", entity.EvidenceQuote);
+        Assert.True(StoryEntityNormalizer.MatchesNormalizedQuote(seg1.Content, entity.EvidenceQuote!));
+
+        var fact = Assert.Single(facts);
+        Assert.Equal(seg1.Id, fact.EvidenceSegmentId);
+        Assert.Equal(seg1.StableId, fact.EvidenceSegmentStableId);
+        Assert.Equal(1, fact.EvidenceSegmentOrder);
+        Assert.Equal("leaves the castle", fact.EvidenceQuote);
+        Assert.True(StoryEntityNormalizer.MatchesNormalizedQuote(seg1.Content, fact.EvidenceQuote!));
+
+        var obs = Assert.Single(speech);
+        Assert.Equal(seg1.Id, obs.EvidenceSegmentId);
+        Assert.Equal(seg1.StableId, obs.EvidenceSegmentStableId);
+        Assert.Equal(1, obs.EvidenceSegmentOrder);
+        Assert.Equal("leaves the castle", obs.EvidenceQuote);
+        Assert.True(StoryEntityNormalizer.MatchesNormalizedQuote(seg1.Content, obs.EvidenceQuote!));
+
+        // When candidate 0 already holds a valid quote, candidate 1 must NOT overwrite or mix it.
+        var keepFirstJson = $$"""
+            {
+              "entities":[
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0,"evidenceQuote":"enters the room"},
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":1,"evidenceQuote":"leaves the castle"}
+              ]
+            }
+            """;
+        var (keptEntities, _, _) = StoryMemoryExtractor.ParseAndValidateResponse(keepFirstJson, window);
+        var kept = Assert.Single(keptEntities);
+        Assert.Equal(seg0.Id, kept.EvidenceSegmentId);
+        Assert.Equal(0, kept.EvidenceSegmentOrder);
+        Assert.Equal("enters the room", kept.EvidenceQuote);
+    }
+
     [Theory]
     [InlineData(FinishReason.MaxTokens)]
     [InlineData(FinishReason.ContentFiltered)]

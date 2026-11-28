@@ -35,12 +35,18 @@ public static partial class StoryMemoryEndpoints
             string? category,
             string? status,
             string? search,
+            int? startOrder,
+            int? endOrder,
+            Guid? evidenceSegmentId,
             BasiDbContext db,
             UserManager<ApplicationUser> userManager,
             CancellationToken ct) =>
         {
             var (user, err) = await EnsureNovelOwnedAsync(ctx, novelId, db, userManager, ct);
             if (err is not null) return err;
+
+            if (!IsValidOrderRange(startOrder, endOrder, out var rangeErr))
+                return Results.BadRequest(new { error = rangeErr });
 
             var query = db.StoryEntities
                 .AsNoTracking()
@@ -66,6 +72,19 @@ public static partial class StoryMemoryEndpoints
                 if (!StoryEntityNormalizer.TryParseFactStatus(status, out var parsedStatus))
                     return Results.BadRequest(new { error = $"Invalid status '{status}'." });
                 query = query.Where(e => e.Status == parsedStatus);
+            }
+
+            if (evidenceSegmentId.HasValue && evidenceSegmentId.Value != Guid.Empty)
+            {
+                query = query.Where(e => e.EvidenceSegmentId == evidenceSegmentId.Value);
+            }
+
+            if (startOrder.HasValue || endOrder.HasValue)
+            {
+                query = query.Where(e =>
+                    e.EvidenceSegmentOrder.HasValue
+                    && (!startOrder.HasValue || e.EvidenceSegmentOrder.Value >= startOrder.Value)
+                    && (!endOrder.HasValue || e.EvidenceSegmentOrder.Value <= endOrder.Value));
             }
 
             var entities = await query
@@ -267,13 +286,20 @@ public static partial class StoryMemoryEndpoints
             HttpContext ctx,
             Guid novelId,
             string? targetLanguage,
+            string? factType,
             string? status,
+            int? startOrder,
+            int? endOrder,
+            Guid? evidenceSegmentId,
             BasiDbContext db,
             UserManager<ApplicationUser> userManager,
             CancellationToken ct) =>
         {
             var (user, err) = await EnsureNovelOwnedAsync(ctx, novelId, db, userManager, ct);
             if (err is not null) return err;
+
+            if (!IsValidOrderRange(startOrder, endOrder, out var rangeErr))
+                return Results.BadRequest(new { error = rangeErr });
 
             var query = db.SceneFacts
                 .AsNoTracking()
@@ -287,11 +313,31 @@ public static partial class StoryMemoryEndpoints
                 query = query.Where(f => f.TargetLanguage.ToLower() == normLang.ToLower());
             }
 
+            if (!string.IsNullOrWhiteSpace(factType))
+            {
+                if (!StoryEntityNormalizer.TryParseSceneFactType(factType, out var parsedType))
+                    return Results.BadRequest(new { error = $"Invalid factType '{factType}'." });
+                query = query.Where(f => f.FactType == parsedType);
+            }
+
             if (!string.IsNullOrWhiteSpace(status))
             {
                 if (!StoryEntityNormalizer.TryParseFactStatus(status, out var parsedStatus))
                     return Results.BadRequest(new { error = $"Invalid status '{status}'." });
                 query = query.Where(f => f.Status == parsedStatus);
+            }
+
+            if (evidenceSegmentId.HasValue && evidenceSegmentId.Value != Guid.Empty)
+            {
+                query = query.Where(f => f.EvidenceSegmentId == evidenceSegmentId.Value);
+            }
+
+            if (startOrder.HasValue || endOrder.HasValue)
+            {
+                query = query.Where(f =>
+                    f.EvidenceSegmentOrder.HasValue
+                    && (!startOrder.HasValue || f.EvidenceSegmentOrder.Value >= startOrder.Value)
+                    && (!endOrder.HasValue || f.EvidenceSegmentOrder.Value <= endOrder.Value));
             }
 
             var facts = await query
@@ -420,6 +466,13 @@ public static partial class StoryMemoryEndpoints
                 fact.EvidenceSegmentOrder = evSeg?.Order;
                 fact.EvidenceQuote = validation.EvidenceQuote;
             }
+            else if (req.ClearEvidence == true)
+            {
+                fact.EvidenceSegmentId = null;
+                fact.EvidenceSegmentStableId = null;
+                fact.EvidenceSegmentOrder = null;
+                fact.EvidenceQuote = null;
+            }
             fact.Version++;
             fact.UpdatedAt = DateTime.UtcNow;
 
@@ -463,12 +516,18 @@ public static partial class StoryMemoryEndpoints
             Guid novelId,
             string? targetLanguage,
             string? status,
+            int? startOrder,
+            int? endOrder,
+            Guid? evidenceSegmentId,
             BasiDbContext db,
             UserManager<ApplicationUser> userManager,
             CancellationToken ct) =>
         {
             var (user, err) = await EnsureNovelOwnedAsync(ctx, novelId, db, userManager, ct);
             if (err is not null) return err;
+
+            if (!IsValidOrderRange(startOrder, endOrder, out var rangeErr))
+                return Results.BadRequest(new { error = rangeErr });
 
             var query = db.SpeechObservations
                 .AsNoTracking()
@@ -487,6 +546,19 @@ public static partial class StoryMemoryEndpoints
                 if (!StoryEntityNormalizer.TryParseFactStatus(status, out var parsedStatus))
                     return Results.BadRequest(new { error = $"Invalid status '{status}'." });
                 query = query.Where(o => o.Status == parsedStatus);
+            }
+
+            if (evidenceSegmentId.HasValue && evidenceSegmentId.Value != Guid.Empty)
+            {
+                query = query.Where(o => o.EvidenceSegmentId == evidenceSegmentId.Value);
+            }
+
+            if (startOrder.HasValue || endOrder.HasValue)
+            {
+                query = query.Where(o =>
+                    o.EvidenceSegmentOrder.HasValue
+                    && (!startOrder.HasValue || o.EvidenceSegmentOrder.Value >= startOrder.Value)
+                    && (!endOrder.HasValue || o.EvidenceSegmentOrder.Value <= endOrder.Value));
             }
 
             var observations = await query
@@ -622,6 +694,13 @@ public static partial class StoryMemoryEndpoints
                 obs.EvidenceSegmentStableId = evSeg?.StableId;
                 obs.EvidenceSegmentOrder = evSeg?.Order;
                 obs.EvidenceQuote = validation.EvidenceQuote;
+            }
+            else if (req.ClearEvidence == true)
+            {
+                obs.EvidenceSegmentId = null;
+                obs.EvidenceSegmentStableId = null;
+                obs.EvidenceSegmentOrder = null;
+                obs.EvidenceQuote = null;
             }
             obs.Version++;
             obs.UpdatedAt = DateTime.UtcNow;
@@ -983,12 +1062,12 @@ public static partial class StoryMemoryEndpoints
                     existing.Category = cand.Category;
                     existing.Aliases = mergedAliases;
                     existing.Description ??= cand.Description;
-                    if (!existing.EvidenceSegmentId.HasValue)
+                    if (ShouldApplyEvidenceBundle(existing.EvidenceSegmentId, existing.EvidenceQuote, cand.EvidenceQuote))
                     {
                         existing.EvidenceSegmentId = cand.EvidenceSegmentId;
                         existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
                         existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
-                        existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        existing.EvidenceQuote = cand.EvidenceQuote;
                         if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
                         {
                             existing.Status = FactStatus.Provisional;
@@ -1058,12 +1137,12 @@ public static partial class StoryMemoryEndpoints
                 }
                 else
                 {
-                    if (!existing.EvidenceSegmentId.HasValue)
+                    if (ShouldApplyEvidenceBundle(existing.EvidenceSegmentId, existing.EvidenceQuote, cand.EvidenceQuote))
                     {
                         existing.EvidenceSegmentId = cand.EvidenceSegmentId;
                         existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
                         existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
-                        existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        existing.EvidenceQuote = cand.EvidenceQuote;
                         if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
                         {
                             existing.Status = FactStatus.Provisional;
@@ -1137,12 +1216,12 @@ public static partial class StoryMemoryEndpoints
                 else
                 {
                     existing.PronounStyle ??= cand.PronounStyle;
-                    if (!existing.EvidenceSegmentId.HasValue)
+                    if (ShouldApplyEvidenceBundle(existing.EvidenceSegmentId, existing.EvidenceQuote, cand.EvidenceQuote))
                     {
                         existing.EvidenceSegmentId = cand.EvidenceSegmentId;
                         existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
                         existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
-                        existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        existing.EvidenceQuote = cand.EvidenceQuote;
                         if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
                         {
                             existing.Status = FactStatus.Provisional;
@@ -1187,6 +1266,20 @@ public static partial class StoryMemoryEndpoints
         }
 
         return new MergeCounts(created, updated, skippedLocked, conflicted);
+    }
+
+    private static bool ShouldApplyEvidenceBundle(Guid? existingSegId, string? existingQuote, string? candQuote) =>
+        !existingSegId.HasValue || (string.IsNullOrWhiteSpace(existingQuote) && !string.IsNullOrWhiteSpace(candQuote));
+
+    private static bool IsValidOrderRange(int? startOrder, int? endOrder, out string? error)
+    {
+        if (startOrder < 0 || endOrder < 0 || (startOrder.HasValue && endOrder.HasValue && endOrder < startOrder))
+        {
+            error = "Invalid segment order range.";
+            return false;
+        }
+        error = null;
+        return true;
     }
 
     private static bool IsProtectedFromAiOverwrite(bool isLocked, StoryEntityOrigin origin, FactStatus status) =>
@@ -1560,7 +1653,8 @@ public sealed record UpsertSceneFactRequest(
     string? Status = null,
     Guid? EvidenceSegmentId = null,
     string? EvidenceQuote = null,
-    int? ExpectedVersion = null);
+    int? ExpectedVersion = null,
+    bool? ClearEvidence = null);
 
 public sealed record UpsertSpeechObservationRequest(
     string TargetLanguage,
@@ -1573,7 +1667,8 @@ public sealed record UpsertSpeechObservationRequest(
     string? Status = null,
     Guid? EvidenceSegmentId = null,
     string? EvidenceQuote = null,
-    int? ExpectedVersion = null);
+    int? ExpectedVersion = null,
+    bool? ClearEvidence = null);
 
 public sealed record ExtractStoryMemoryRequest(
     string TargetLanguage,

@@ -333,11 +333,15 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                 {
                     throw new InvalidOperationException(mergeAliasErr);
                 }
+                var upgradeEvidence = ShouldUpgradeEvidenceBundle(existing.EvidenceQuote, quote);
                 entitiesByKey[normSource] = existing with
                 {
                     Aliases = mergedAliases,
                     Description = existing.Description ?? description,
-                    EvidenceQuote = existing.EvidenceQuote ?? quote
+                    EvidenceSegmentId = upgradeEvidence ? evidenceSeg.Id : existing.EvidenceSegmentId,
+                    EvidenceSegmentStableId = upgradeEvidence ? evidenceSeg.StableId : existing.EvidenceSegmentStableId,
+                    EvidenceSegmentOrder = upgradeEvidence ? evidenceSeg.Order : existing.EvidenceSegmentOrder,
+                    EvidenceQuote = upgradeEvidence ? quote : existing.EvidenceQuote
                 };
             }
             else
@@ -402,9 +406,15 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                         throw new InvalidOperationException($"Conflicting duplicate sceneFact candidates for '{factKey}' in extraction response.");
                     }
 
-                    if (existingFact.EvidenceQuote is null && quote is not null)
+                    if (ShouldUpgradeEvidenceBundle(existingFact.EvidenceQuote, quote))
                     {
-                        sceneFactsByKey[normFactKey] = existingFact with { EvidenceQuote = quote };
+                        sceneFactsByKey[normFactKey] = existingFact with
+                        {
+                            EvidenceSegmentId = evidenceSeg.Id,
+                            EvidenceSegmentStableId = evidenceSeg.StableId,
+                            EvidenceSegmentOrder = evidenceSeg.Order,
+                            EvidenceQuote = quote
+                        };
                     }
                 }
                 else
@@ -498,13 +508,16 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                         throw new InvalidOperationException($"Conflicting duplicate speechObservation candidates for '{speakerName}' in extraction response.");
                     }
 
-                    if ((existingSpeech.PronounStyle is null && pronounStyle is not null)
-                        || (existingSpeech.EvidenceQuote is null && quote is not null))
+                    var upgradeEvidence = ShouldUpgradeEvidenceBundle(existingSpeech.EvidenceQuote, quote);
+                    if ((existingSpeech.PronounStyle is null && pronounStyle is not null) || upgradeEvidence)
                     {
                         speechByKey[compositeKey] = existingSpeech with
                         {
                             PronounStyle = existingSpeech.PronounStyle ?? pronounStyle,
-                            EvidenceQuote = existingSpeech.EvidenceQuote ?? quote
+                            EvidenceSegmentId = upgradeEvidence ? evidenceSeg.Id : existingSpeech.EvidenceSegmentId,
+                            EvidenceSegmentStableId = upgradeEvidence ? evidenceSeg.StableId : existingSpeech.EvidenceSegmentStableId,
+                            EvidenceSegmentOrder = upgradeEvidence ? evidenceSeg.Order : existingSpeech.EvidenceSegmentOrder,
+                            EvidenceQuote = upgradeEvidence ? quote : existingSpeech.EvidenceQuote
                         };
                     }
                 }
@@ -526,7 +539,68 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
             }
         }
 
-        return (entitiesByKey.Values.ToList(), sceneFactsByKey.Values.ToList(), speechByKey.Values.ToList());
+        var finalEntities = entitiesByKey.Values.ToList();
+        var finalFacts = sceneFactsByKey.Values.ToList();
+        var finalSpeech = speechByKey.Values.ToList();
+
+        ValidateMergedEvidenceInvariants(finalEntities, finalFacts, finalSpeech, byOrder);
+
+        return (finalEntities, finalFacts, finalSpeech);
+    }
+
+    private static bool ShouldUpgradeEvidenceBundle(string? existingQuote, string? incomingQuote) =>
+        string.IsNullOrWhiteSpace(existingQuote) && !string.IsNullOrWhiteSpace(incomingQuote);
+
+    private static void ValidateMergedEvidenceInvariants(
+        IEnumerable<ExtractedEntityCandidate> entities,
+        IEnumerable<ExtractedSceneFactCandidate> sceneFacts,
+        IEnumerable<ExtractedSpeechObservationCandidate> speechObservations,
+        IReadOnlyDictionary<int, SourceSegmentInput> byOrder)
+    {
+        foreach (var e in entities)
+        {
+            var seg = AssertEvidenceBundleIntegrity("entities", e.EvidenceSegmentId, e.EvidenceSegmentStableId, e.EvidenceSegmentOrder, e.EvidenceQuote, byOrder);
+            var normSegContent = StoryEntityNormalizer.NormalizeKey(seg.Content);
+            var matched = StoryMemorySelector.MatchesNormalizedTerm(normSegContent, e.NormalizedSourceTerm)
+                || e.Aliases.Any(a => StoryMemorySelector.MatchesNormalizedTerm(normSegContent, StoryEntityNormalizer.NormalizeKey(a)));
+            if (!matched)
+            {
+                throw new InvalidOperationException($"Merged entity '{e.SourceTerm}' does not match referenced segment order {seg.Order}.");
+            }
+        }
+
+        foreach (var f in sceneFacts)
+        {
+            AssertEvidenceBundleIntegrity("sceneFacts", f.EvidenceSegmentId, f.EvidenceSegmentStableId, f.EvidenceSegmentOrder, f.EvidenceQuote, byOrder);
+        }
+
+        foreach (var s in speechObservations)
+        {
+            AssertEvidenceBundleIntegrity("speechObservations", s.EvidenceSegmentId, s.EvidenceSegmentStableId, s.EvidenceSegmentOrder, s.EvidenceQuote, byOrder);
+        }
+    }
+
+    private static SourceSegmentInput AssertEvidenceBundleIntegrity(
+        string section,
+        Guid segId,
+        string stableId,
+        int order,
+        string? quote,
+        IReadOnlyDictionary<int, SourceSegmentInput> byOrder)
+    {
+        if (!byOrder.TryGetValue(order, out var seg)
+            || seg.Id != segId
+            || !string.Equals(seg.StableId, stableId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{section} merged evidence reference is inconsistent with supplied source window.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(quote) && !StoryEntityNormalizer.MatchesNormalizedQuote(seg.Content, quote))
+        {
+            throw new InvalidOperationException($"{section} merged evidenceQuote does not match referenced segment order {seg.Order}.");
+        }
+
+        return seg;
     }
 
     private static (SourceSegmentInput Segment, string? Quote) ResolveAndValidateEvidence(

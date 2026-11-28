@@ -799,4 +799,135 @@ public class StoryMemoryEndpointIntegrationTests
         Assert.Equal(0, factsDoc.RootElement.GetArrayLength());
         Assert.Equal(0, speechDoc.RootElement.GetArrayLength());
     }
+
+    [Fact]
+    public async Task Extraction_SameKeyAcrossTwoSegments_PreservesMatchingEvidenceBundle_EndToEnd()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, segments, _, googleId, email) = await SeedNovelAsync(factory, new[]
+        {
+            "Alice enters the room.",
+            "Alice leaves the castle."
+        });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
+        {
+            var payload = $$"""
+                {
+                  "entities":[
+                    {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{segments[0].StableId}}"},
+                    {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{segments[1].StableId}}","evidenceQuote":"leaves the castle"}
+                  ],
+                  "sceneFacts":[
+                    {"factKey":"SceneMove","factType":"EventState","summary":"Alice moves","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{segments[0].StableId}}"},
+                    {"factKey":"SceneMove","factType":"EventState","summary":"Alice moves","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{segments[1].StableId}}","evidenceQuote":"leaves the castle"}
+                  ],
+                  "speechObservations":[
+                    {"speakerName":"Alice","speechRegister":"Calm","observation":"Measured tone","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{segments[0].StableId}}"},
+                    {"speakerName":"Alice","speechRegister":"Calm","observation":"Measured tone","evidenceSegmentOrder":1,"evidenceSegmentStableId":"{{segments[1].StableId}}","evidenceQuote":"leaves the castle"}
+                  ]
+                }
+                """;
+            return Task.FromResult(new AiResponse(payload, 20, 20, 40, req.Model, FinishReason.Stop));
+        });
+
+        var res = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+        var e = doc.RootElement.GetProperty("glossary")[0];
+        var f = doc.RootElement.GetProperty("sceneFacts")[0];
+        var s = doc.RootElement.GetProperty("speechObservations")[0];
+        foreach (var item in new[] { e, f, s })
+        {
+            Assert.Equal(segments[1].Id, item.GetProperty("evidenceSegmentId").GetGuid());
+            Assert.Equal(segments[1].StableId, item.GetProperty("evidenceSegmentStableId").GetString());
+            Assert.Equal(1, item.GetProperty("evidenceSegmentOrder").GetInt32());
+            Assert.Equal("leaves the castle", item.GetProperty("evidenceQuote").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task Retrieval_FiltersByChapterSceneOrderRangeAndEvidenceSegmentId()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, segments, _, googleId, email) = await SeedNovelAsync(factory, new[]
+        {
+            "Chapter 1: Ainz entered the throne room.",
+            "Chapter 2: Albedo waited outside."
+        });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        {
+            targetLanguage = "vi",
+            sourceTerm = "Ainz",
+            translatedTerm = "Ainz",
+            category = "Character",
+            evidenceSegmentId = segments[0].Id,
+            evidenceQuote = "Ainz entered"
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        {
+            targetLanguage = "vi",
+            sourceTerm = "Albedo",
+            translatedTerm = "Albedo",
+            category = "Character",
+            evidenceSegmentId = segments[1].Id,
+            evidenceQuote = "Albedo waited"
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory", new
+        {
+            targetLanguage = "vi",
+            sourceTerm = "GlobalTerm",
+            translatedTerm = "GlobalTerm",
+            category = "Other"
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/scene-facts", new
+        {
+            targetLanguage = "vi",
+            factKey = "Ch1Throne",
+            factType = "Setting",
+            summary = "Inside throne room",
+            evidenceSegmentId = segments[0].Id
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/scene-facts", new
+        {
+            targetLanguage = "vi",
+            factKey = "Ch2Corridor",
+            factType = "Time",
+            summary = "Night watch outside",
+            evidenceSegmentId = segments[1].Id
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Created, (await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/speech-observations", new
+        {
+            targetLanguage = "vi",
+            speakerName = "Albedo",
+            speechRegister = "Devoted",
+            observation = "Speaks reverently",
+            evidenceSegmentId = segments[1].Id
+        })).StatusCode);
+
+        var ch2Entities = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/story-memory?startOrder=1&endOrder=1")).Content.ReadAsStringAsync());
+        Assert.Equal("Albedo", Assert.Single(ch2Entities.RootElement.EnumerateArray()).GetProperty("sourceTerm").GetString());
+
+        var seg0Facts = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/scene-facts?evidenceSegmentId={segments[0].Id}&factType=Setting")).Content.ReadAsStringAsync());
+        Assert.Equal("Ch1Throne", Assert.Single(seg0Facts.RootElement.EnumerateArray()).GetProperty("factKey").GetString());
+
+        var ch2Speech = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/speech-observations?startOrder=1")).Content.ReadAsStringAsync());
+        Assert.Equal("Albedo", Assert.Single(ch2Speech.RootElement.EnumerateArray()).GetProperty("speakerName").GetString());
+
+        var badRange = await client.GetAsync($"/api/novels/{novelId}/story-memory?startOrder=2&endOrder=1");
+        Assert.Equal(HttpStatusCode.BadRequest, badRange.StatusCode);
+    }
 }

@@ -159,6 +159,7 @@ export interface UpsertSceneFactPayload {
   evidenceSegmentId?: string | null;
   evidenceQuote?: string | null;
   expectedVersion?: number | null;
+  clearEvidence?: boolean;
 }
 
 export interface SpeechObservationItem {
@@ -195,6 +196,7 @@ export interface UpsertSpeechObservationPayload {
   evidenceSegmentId?: string | null;
   evidenceQuote?: string | null;
   expectedVersion?: number | null;
+  clearEvidence?: boolean;
 }
 
 export interface ExtractStoryMemoryPayload {
@@ -466,17 +468,37 @@ async function sendStoryMutation<T>(
   return res.json();
 }
 
+export interface StoryMemoryQueryFilters {
+  targetLanguage?: string;
+  category?: string;
+  factType?: string;
+  status?: string;
+  search?: string;
+  startOrder?: number;
+  endOrder?: number;
+  evidenceSegmentId?: string;
+}
+
+function buildStoryMemoryQueryString(opts?: string | StoryMemoryQueryFilters): string {
+  const filters: StoryMemoryQueryFilters = typeof opts === 'string' ? { targetLanguage: opts } : (opts ?? {});
+  const params = new URLSearchParams();
+  if (filters.targetLanguage) params.set('targetLanguage', filters.targetLanguage);
+  if (filters.category) params.set('category', filters.category);
+  if (filters.factType) params.set('factType', filters.factType);
+  if (filters.status) params.set('status', filters.status);
+  if (filters.search) params.set('search', filters.search);
+  if (filters.startOrder !== undefined) params.set('startOrder', String(filters.startOrder));
+  if (filters.endOrder !== undefined) params.set('endOrder', String(filters.endOrder));
+  if (filters.evidenceSegmentId) params.set('evidenceSegmentId', filters.evidenceSegmentId);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
 export async function getStoryMemory(
   novelId: string,
-  opts?: { targetLanguage?: string; category?: string; status?: string; search?: string }
+  opts?: StoryMemoryQueryFilters
 ): Promise<StoryEntityItem[]> {
-  const params = new URLSearchParams();
-  if (opts?.targetLanguage) params.set('targetLanguage', opts.targetLanguage);
-  if (opts?.category) params.set('category', opts.category);
-  if (opts?.status) params.set('status', opts.status);
-  if (opts?.search) params.set('search', opts.search);
-  const qs = params.toString();
-  const url = `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory${qs ? `?${qs}` : ''}`;
+  const url = `${API_BASE}/novels/${encodeURIComponent(novelId)}/story-memory${buildStoryMemoryQueryString(opts)}`;
   const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch story memory'));
   return res.json();
@@ -491,9 +513,11 @@ export const updateStoryEntity = (novelId: string, entryId: string, payload: Ups
 export const deleteStoryEntity = (novelId: string, entryId: string) =>
   sendStoryMutation<{ deleted: boolean; id: string }>(`/novels/${encodeURIComponent(novelId)}/story-memory/${encodeURIComponent(entryId)}`, 'DELETE', 'Failed to delete story entity');
 
-export async function getSceneFacts(novelId: string, targetLanguage?: string): Promise<SceneFactItem[]> {
-  const qs = targetLanguage ? `?targetLanguage=${encodeURIComponent(targetLanguage)}` : '';
-  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/scene-facts${qs}`, { credentials: 'include' });
+export async function getSceneFacts(
+  novelId: string,
+  opts?: string | StoryMemoryQueryFilters
+): Promise<SceneFactItem[]> {
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/scene-facts${buildStoryMemoryQueryString(opts)}`, { credentials: 'include' });
   if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch scene facts'));
   return res.json();
 }
@@ -507,9 +531,11 @@ export const updateSceneFact = (novelId: string, factId: string, payload: Upsert
 export const deleteSceneFact = (novelId: string, factId: string) =>
   sendStoryMutation<{ deleted: boolean; id: string }>(`/novels/${encodeURIComponent(novelId)}/scene-facts/${encodeURIComponent(factId)}`, 'DELETE', 'Failed to delete scene fact');
 
-export async function getSpeechObservations(novelId: string, targetLanguage?: string): Promise<SpeechObservationItem[]> {
-  const qs = targetLanguage ? `?targetLanguage=${encodeURIComponent(targetLanguage)}` : '';
-  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/speech-observations${qs}`, { credentials: 'include' });
+export async function getSpeechObservations(
+  novelId: string,
+  opts?: string | StoryMemoryQueryFilters
+): Promise<SpeechObservationItem[]> {
+  const res = await fetch(`${API_BASE}/novels/${encodeURIComponent(novelId)}/speech-observations${buildStoryMemoryQueryString(opts)}`, { credentials: 'include' });
   if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch speech observations'));
   return res.json();
 }
