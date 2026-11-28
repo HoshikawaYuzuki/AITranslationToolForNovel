@@ -105,6 +105,91 @@ public class StoryMemoryTests
     }
 
     [Fact]
+    public void Normalizer_BuildConflictDetails_CapsAt1000Chars_AndPreservesSurrogatePairs()
+    {
+        var longIncoming = new string('A', 999) + "𠀀";
+        var longExisting = string.Concat(Enumerable.Repeat("𠀀", 500));
+
+        var details = StoryEntityNormalizer.BuildConflictDetails("scene fact", longIncoming, longExisting, 12);
+
+        Assert.True(details.Length <= StoryEntityNormalizer.MaxDescriptionLength);
+        Assert.False(StoryEntityNormalizer.ContainsInvalidUtf16Surrogates(details));
+
+        var boundaryCut = StoryEntityNormalizer.TruncateSurrogateSafe("abc𠀀def", 7);
+        Assert.False(StoryEntityNormalizer.ContainsInvalidUtf16Surrogates(boundaryCut));
+        Assert.True(boundaryCut.Length <= 7);
+    }
+
+    [Fact]
+    public void Selector_ExcludesAiExtractedWithoutEvidenceId_AllowsManualWithoutEvidenceId()
+    {
+        var entities = new List<StoryEntity>
+        {
+            new()
+            {
+                Id = Guid.NewGuid(),
+                SourceTerm = "UnverifiedLegacyAi",
+                NormalizedSourceTerm = "unverifiedlegacyai",
+                TranslatedTerm = "BadLegacy",
+                Category = StoryEntityCategory.Character,
+                Origin = StoryEntityOrigin.AiExtracted,
+                Status = FactStatus.Provisional,
+                EvidenceSegmentId = null
+            },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                SourceTerm = "VerifiedAi",
+                NormalizedSourceTerm = "verifiedai",
+                TranslatedTerm = "Verified",
+                Category = StoryEntityCategory.Character,
+                Origin = StoryEntityOrigin.AiExtracted,
+                Status = FactStatus.Provisional,
+                EvidenceSegmentId = Guid.NewGuid(),
+                EvidenceSegmentOrder = 0
+            },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                SourceTerm = "ManualNoSeg",
+                NormalizedSourceTerm = "manualnoseg",
+                TranslatedTerm = "ManualTerm",
+                Category = StoryEntityCategory.Location,
+                Origin = StoryEntityOrigin.Manual,
+                Status = FactStatus.Provisional,
+                EvidenceSegmentId = null
+            }
+        };
+
+        var glossary = _selector.SelectForBatch(entities, new[] { "UnverifiedLegacyAi VerifiedAi ManualNoSeg." });
+        Assert.Equal(2, glossary.Count);
+        Assert.DoesNotContain(glossary, g => g.SourceTerm == "UnverifiedLegacyAi");
+        Assert.Contains(glossary, g => g.SourceTerm == "VerifiedAi");
+        Assert.Contains(glossary, g => g.SourceTerm == "ManualNoSeg");
+
+        var consistencyIssues = _selector.CheckConsistency(
+            entities,
+            new (int, string, string?)[] { (0, "UnverifiedLegacyAi ran away.", "Ignored completely.") });
+        Assert.Empty(consistencyIssues);
+
+        var facts = new List<SceneFact>
+        {
+            new() { Id = Guid.NewGuid(), FactKey = "BadFact", NormalizedFactKey = "badfact", FactType = SceneFactType.Setting, Summary = "Ignore", Origin = StoryEntityOrigin.AiExtracted, Status = FactStatus.Provisional, EvidenceSegmentId = null },
+            new() { Id = Guid.NewGuid(), FactKey = "ManualFact", NormalizedFactKey = "manualfact", FactType = SceneFactType.Setting, Summary = "Keep", Origin = StoryEntityOrigin.Manual, Status = FactStatus.Provisional, EvidenceSegmentId = null }
+        };
+        var selectedFact = Assert.Single(_selector.SelectSceneFactsForBatch(facts, new[] { 0 }, new[] { "Scene" }));
+        Assert.Equal("ManualFact", selectedFact.FactKey);
+
+        var speech = new List<SpeechObservation>
+        {
+            new() { Id = Guid.NewGuid(), SpeakerName = "VerifiedAi", NormalizedSpeakerName = "verifiedai", SpeechRegister = "AI", Observation = "Bad", Origin = StoryEntityOrigin.AiExtracted, Status = FactStatus.Provisional, EvidenceSegmentId = null },
+            new() { Id = Guid.NewGuid(), SpeakerName = "VerifiedAi", NormalizedSpeakerName = "verifiedai", SpeechRegister = "Manual", Observation = "Good", Origin = StoryEntityOrigin.Manual, Status = FactStatus.Provisional, EvidenceSegmentId = null }
+        };
+        var selectedSpeech = Assert.Single(_selector.SelectSpeechObservationsForBatch(speech, new[] { "VerifiedAi" }, glossary));
+        Assert.Equal("Manual", selectedSpeech.SpeechRegister);
+    }
+
+    [Fact]
     public void Selector_StoryMemoryLite_ExcludesUnknownAndConflicted_PrefersConfirmed()
     {
         var entities = new List<StoryEntity>
@@ -260,6 +345,67 @@ public class StoryMemoryTests
     }
 
     [Theory]
+    [InlineData("""
+        {"entities":[{"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0},{"sourceTerm":"Alice","translatedTerm":"Different","category":"Character","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[{"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0},{"sourceTerm":"alice","translatedTerm":"Alice","category":"Location","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[],"sceneFacts":[{"factKey":"Weather","factType":"Setting","summary":"Rainy night","evidenceSegmentOrder":0},{"factKey":"weather","factType":"Setting","summary":"Sunny noon","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[],"sceneFacts":[{"factKey":"Weather","factType":"Setting","summary":"Rainy night","evidenceSegmentOrder":0},{"factKey":"weather","factType":"Time","summary":"Rainy night","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[],"speechObservations":[{"speakerName":"Alice","speechRegister":"Polite","observation":"Formal speech","evidenceSegmentOrder":0},{"speakerName":"alice","speechRegister":"Casual","observation":"Formal speech","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[],"speechObservations":[{"speakerName":"Alice","speechRegister":"Polite","pronounStyle":"Watashi","observation":"Formal speech","evidenceSegmentOrder":0},{"speakerName":"Alice","speechRegister":"Polite","pronounStyle":"Ore","observation":"Formal speech","evidenceSegmentOrder":0}]}
+        """)]
+    [InlineData("""
+        {"entities":[{"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0,"firstSeenOrder":1}]}
+        """)]
+    public void Extractor_ParseAndValidate_RejectsConflictingDuplicatesAndMismatchedOrderAliases(string json)
+    {
+        var window = new[] { Seg(0, "Alice stood quietly in the rain."), Seg(1, "Later.") };
+        Assert.Throws<InvalidOperationException>(() => StoryMemoryExtractor.ParseAndValidateResponse(json, window));
+    }
+
+    [Fact]
+    public void Extractor_ParseAndValidate_SupportsStableIdOnly_AndMergesConsistentDuplicates()
+    {
+        var seg0 = Seg(0, "Alice and Alivia arrived at the hall.");
+        var seg1 = Seg(1, "Alice spoke quietly.");
+        var window = new[] { seg0, seg1 };
+
+        var json = $$"""
+            {
+              "entities":[
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","aliases":[],"evidenceSegmentStableId":"{{seg0.StableId}}"},
+                {"sourceTerm":"alice","translatedTerm":"alice","category":"Character","aliases":["Alivia"],"evidenceSegmentOrder":0}
+              ],
+              "sceneFacts":[
+                {"factKey":"Hall","factType":"Setting","summary":"Grand hall","evidenceSegmentStableId":"{{seg0.StableId}}"}
+              ],
+              "speechObservations":[
+                {"speakerName":"Alice","speechRegister":"Calm","observation":"Speaks softly","evidenceSegmentStableId":"{{seg1.StableId}}"}
+              ]
+            }
+            """;
+
+        var (entities, facts, speech) = StoryMemoryExtractor.ParseAndValidateResponse(json, window);
+        var e = Assert.Single(entities);
+        Assert.Equal(seg0.Id, e.EvidenceSegmentId);
+        Assert.Contains("Alivia", e.Aliases);
+        Assert.Equal(seg0.Id, Assert.Single(facts).EvidenceSegmentId);
+        Assert.Equal(seg1.Id, Assert.Single(speech).EvidenceSegmentId);
+
+        var mismatchedJson = $$"""{"entities":[{"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0,"evidenceSegmentStableId":"{{seg1.StableId}}"}]}""";
+        Assert.Throws<InvalidOperationException>(() => StoryMemoryExtractor.ParseAndValidateResponse(mismatchedJson, window));
+    }
+
+    [Theory]
     [InlineData(FinishReason.MaxTokens)]
     [InlineData(FinishReason.ContentFiltered)]
     [InlineData(FinishReason.Error)]
@@ -272,7 +418,22 @@ public class StoryMemoryTests
             _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { Seg(0, "テスト") }));
 
         Assert.Equal(120, ex.PromptTokens);
+        Assert.Equal(45, ex.CompletionTokens);
         Assert.Equal(165, ex.TotalTokens);
+        Assert.Equal("stub-model", ex.ModelUsed);
+    }
+
+    [Fact]
+    public async Task Extractor_ExtractAsync_MalformedJson_ThrowsWithUsageMetadata()
+    {
+        var provider = new StubAiProvider(_ =>
+            new AiResponse("Not JSON at all", 80, 12, 92, "stub-model", FinishReason.Stop));
+
+        var ex = await Assert.ThrowsAsync<StoryMemoryExtractionException>(() =>
+            _extractor.ExtractAsync(provider, "stub-model", "ja", "vi", new[] { Seg(0, "テスト") }));
+
+        Assert.Equal(92, ex.TotalTokens);
+        Assert.Contains("invalid story memory", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

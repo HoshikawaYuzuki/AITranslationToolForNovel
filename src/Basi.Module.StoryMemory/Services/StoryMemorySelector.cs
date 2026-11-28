@@ -65,7 +65,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         }
 
         var eligible = entities
-            .Where(e => e.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Where(e => IsEligibleForContext(e.Status, e.Origin, e.EvidenceSegmentId))
             .OrderBy(e => e.Status == FactStatus.Confirmed ? 0 : 1)
             .ThenByDescending(e => e.NormalizedSourceTerm.Length)
             .ThenBy(e => e.EvidenceSegmentOrder ?? int.MaxValue)
@@ -141,7 +141,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         var batchCorpus = StoryEntityNormalizer.NormalizeKey(string.Join(" ", batchSourceTexts ?? Array.Empty<string>()));
 
         var ordered = facts
-            .Where(f => f.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Where(f => IsEligibleForContext(f.Status, f.Origin, f.EvidenceSegmentId))
             .Where(f => !f.EvidenceSegmentOrder.HasValue || f.EvidenceSegmentOrder.Value <= maxBatchOrder)
             .OrderBy(f => f.Status == FactStatus.Confirmed ? 0 : 1)
             .ThenByDescending(f => MatchesNormalizedTerm(batchCorpus, f.NormalizedFactKey) ? 1 : 0)
@@ -197,7 +197,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         }
 
         var prioritized = observations
-            .Where(o => o.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Where(o => IsEligibleForContext(o.Status, o.Origin, o.EvidenceSegmentId))
             .Select(o => new
             {
                 Obs = o,
@@ -246,7 +246,7 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
         }
 
         var activeEntities = entities
-            .Where(e => e.Status is FactStatus.Confirmed or FactStatus.Provisional)
+            .Where(e => IsEligibleForContext(e.Status, e.Origin, e.EvidenceSegmentId))
             .ToList();
 
         foreach (var seg in completedSegments)
@@ -300,6 +300,10 @@ public sealed class StoryMemorySelector : IStoryMemorySelector
 
     public static int EstimateSpeechObservationLineLength(SpeechObservationContextItem item) =>
         20 + item.SpeakerName.Length + (item.AddresseeName?.Length ?? 0) + item.SpeechRegister.Length + (item.PronounStyle?.Length ?? 0) + item.Observation.Length + item.Status.Length;
+
+    private static bool IsEligibleForContext(FactStatus status, StoryEntityOrigin origin, Guid? evidenceSegmentId) =>
+        status is FactStatus.Confirmed or FactStatus.Provisional
+        && (origin == StoryEntityOrigin.Manual || evidenceSegmentId.HasValue);
 
     private static GlossaryContextItem ToContextItem(StoryEntity entity)
     {

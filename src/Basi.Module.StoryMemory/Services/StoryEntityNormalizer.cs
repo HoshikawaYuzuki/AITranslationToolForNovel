@@ -242,6 +242,43 @@ public static partial class StoryEntityNormalizer
         return SegmentMarkerRegex().Replace(flattened, "[SEG_");
     }
 
+    /// <summary>
+    /// Truncates text safely without splitting UTF-16 surrogate pairs.
+    /// </summary>
+    public static string TruncateSurrogateSafe(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value) || maxLength <= 0) return string.Empty;
+        if (value.Length <= maxLength) return value;
+        if (maxLength <= 3) return value[..AdjustForSurrogateBoundary(value, maxLength)];
+
+        var cut = AdjustForSurrogateBoundary(value, maxLength - 3);
+        return string.Concat(value.AsSpan(0, cut), "...");
+    }
+
+    /// <summary>
+    /// Builds a bounded, surrogate-safe conflict message guaranteed to fit MaxDescriptionLength (1000 chars).
+    /// </summary>
+    public static string BuildConflictDetails(
+        string incomingLabel,
+        string incomingValue,
+        string existingValue,
+        int? segmentOrder)
+    {
+        const int maxPerValueChars = 350;
+        var cleanIncoming = TruncateSurrogateSafe(CollapseWhitespace(incomingValue), maxPerValueChars);
+        var cleanExisting = TruncateSurrogateSafe(CollapseWhitespace(existingValue), maxPerValueChars);
+        var segSuffix = segmentOrder.HasValue ? $" (segment #{segmentOrder.Value})" : string.Empty;
+        var formatted = $"AI extraction {incomingLabel} '{cleanIncoming}'{segSuffix} conflicted with '{cleanExisting}'.";
+        return TruncateSurrogateSafe(formatted, MaxDescriptionLength);
+    }
+
+    private static int AdjustForSurrogateBoundary(string value, int candidateLength)
+    {
+        if (candidateLength <= 0) return 0;
+        if (candidateLength >= value.Length) return value.Length;
+        return char.IsHighSurrogate(value[candidateLength - 1]) ? candidateLength - 1 : candidateLength;
+    }
+
     private static string CollapseWhitespace(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;

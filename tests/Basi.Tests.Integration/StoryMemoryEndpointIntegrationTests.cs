@@ -595,4 +595,208 @@ public class StoryMemoryEndpointIntegrationTests
         Assert.Equal(1, cDoc.RootElement.GetProperty("issueCount").GetInt32());
         Assert.Equal(1, cDoc.RootElement.GetProperty("issues")[0].GetProperty("segmentOrder").GetInt32());
     }
+
+    [Fact]
+    public async Task ExtractStoryMemory_UpstreamTruncatedOrMalformed_Returns502SanitizedWithoutSecretLeak_AndDoesNotSaveEphemeralKey()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, _, _, googleId, email) = await SeedNovelAsync(factory, new[] { "「アインズ」は立ち上がった。" });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        // 1. Missing stored Gemini key and omitted request key -> 400 Bad Request
+        var missingKeyRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "gemini"
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, missingKeyRes.StatusCode);
+
+        // 2. Valid extraction with ephemeral apiKey -> 200 OK without persisting to RAM vault
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
+            Task.FromResult(new AiResponse("""{"entities":[]}""", 10, 5, 15, req.Model, FinishReason.Stop)));
+        var ephemeralRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "gemini",
+            apiKey = "ephemeral-secret-key-xyz"
+        });
+        Assert.Equal(HttpStatusCode.OK, ephemeralRes.StatusCode);
+
+        var keyStatusRes = await client.GetAsync("/api/auth/api-keys");
+        using var keyStatusDoc = JsonDocument.Parse(await keyStatusRes.Content.ReadAsStringAsync());
+        Assert.False(keyStatusDoc.RootElement.GetProperty("gemini").GetBoolean());
+
+        // 3. Upstream MaxTokens containing canary secret -> 502 BadGateway with sanitized message & zero secret leak
+        const string secretCanary = "AIzaSyCanarySecret9999";
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
+            Task.FromResult(new AiResponse($"invalid json raw body {secretCanary}", 50, 20, 70, req.Model, FinishReason.MaxTokens)));
+
+        var truncatedRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "openai",
+            apiKey = secretCanary
+        });
+        Assert.Equal(HttpStatusCode.BadGateway, truncatedRes.StatusCode);
+        var truncatedBody = await truncatedRes.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(secretCanary, truncatedBody);
+        Assert.Contains("truncated", truncatedBody, StringComparison.OrdinalIgnoreCase);
+
+        // 4. Upstream provider error carrying canary secret in exception message -> 502 without leaking secret
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((_, _) =>
+            throw new AiProviderError(AiErrorCode.NetworkError, $"Upstream failure using bearer {secretCanary}", promptTokens: 20, completionTokens: 0, totalTokens: 20, modelUsed: "gpt-4o-mini"));
+        var errRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "openai",
+            apiKey = secretCanary
+        });
+        Assert.Equal(HttpStatusCode.BadGateway, errRes.StatusCode);
+        var errBody = await errRes.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(secretCanary, errBody);
+    }
+
+    [Fact]
+    public async Task ConflictDetails_TruncatedSafelyWithin1000Chars_ForMaxLengthSceneFactAndSpeechObservation()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, segments, ownerId, googleId, email) = await SeedNovelAsync(factory, new[] { "Ainz stood in the great hall." });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        var maxExistingSummary = new string('E', 1000);
+        var maxIncomingSummary = new string('I', 1000);
+        var maxExistingObs = new string('O', 1000);
+        var maxIncomingObs = new string('N', 1000);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BasiDbContext>();
+            db.SceneFacts.Add(new SceneFact
+            {
+                Id = Guid.NewGuid(),
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                FactKey = "HallState",
+                NormalizedFactKey = "hallstate",
+                FactType = SceneFactType.Setting,
+                Summary = maxExistingSummary,
+                Origin = StoryEntityOrigin.AiExtracted,
+                Status = FactStatus.Provisional,
+                IsLocked = false,
+                EvidenceSegmentId = segments[0].Id,
+                EvidenceSegmentStableId = segments[0].StableId,
+                EvidenceSegmentOrder = 0,
+                Version = 1
+            });
+            db.SpeechObservations.Add(new SpeechObservation
+            {
+                Id = Guid.NewGuid(),
+                OwnerId = ownerId,
+                NovelId = novelId,
+                TargetLanguage = "vi",
+                SpeakerName = "Ainz",
+                NormalizedSpeakerName = "ainz",
+                AddresseeName = null,
+                NormalizedAddresseeName = string.Empty,
+                SpeechRegister = "Sovereign",
+                Observation = maxExistingObs,
+                Origin = StoryEntityOrigin.AiExtracted,
+                Status = FactStatus.Provisional,
+                IsLocked = false,
+                EvidenceSegmentId = segments[0].Id,
+                EvidenceSegmentStableId = segments[0].StableId,
+                EvidenceSegmentOrder = 0,
+                Version = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                entities = Array.Empty<object>(),
+                sceneFacts = new[]
+                {
+                    new { factKey = "HallState", factType = "Setting", summary = maxIncomingSummary, evidenceSegmentOrder = 0 }
+                },
+                speechObservations = new[]
+                {
+                    new { speakerName = "Ainz", speechRegister = "Casual", observation = maxIncomingObs, evidenceSegmentOrder = 0 }
+                }
+            });
+            return Task.FromResult(new AiResponse(payload, 30, 30, 60, req.Model, FinishReason.Stop));
+        });
+
+        var res = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new
+        {
+            targetLanguage = "vi",
+            provider = "mock"
+        });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+        Assert.Equal(2, doc.RootElement.GetProperty("conflicted").GetInt32());
+
+        var factDetails = doc.RootElement.GetProperty("sceneFacts")[0].GetProperty("conflictDetails").GetString()!;
+        var speechDetails = doc.RootElement.GetProperty("speechObservations")[0].GetProperty("conflictDetails").GetString()!;
+        Assert.Equal("Conflicted", doc.RootElement.GetProperty("sceneFacts")[0].GetProperty("status").GetString());
+        Assert.Equal("Conflicted", doc.RootElement.GetProperty("speechObservations")[0].GetProperty("status").GetString());
+        Assert.InRange(factDetails.Length, 1, 1000);
+        Assert.InRange(speechDetails.Length, 1, 1000);
+    }
+
+    [Fact]
+    public async Task Extraction_RejectsConflictingDuplicatesWithinSingleResponse_Returns502WithZeroWrites()
+    {
+        using var factory = new StoryMemoryTestFactory { EnableTestAuth = true };
+        var (novelId, _, _, googleId, email) = await SeedNovelAsync(factory, new[] { "Alice arrived cleanly at dawn." });
+        var client = CreateAuthedClient(factory, googleId, email);
+
+        string payload = """
+            {
+              "entities":[
+                {"sourceTerm":"Alice","translatedTerm":"Alice","category":"Character","evidenceSegmentOrder":0},
+                {"sourceTerm":"alice","translatedTerm":"Different","category":"Character","evidenceSegmentOrder":0}
+              ]
+            }
+            """;
+        factory.ProviderSelector = (_, _) => new StoryMemoryDelegateProvider((req, _) =>
+            Task.FromResult(new AiResponse(payload, 15, 15, 30, req.Model, FinishReason.Stop)));
+
+        var entityConflictRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" });
+        Assert.Equal(HttpStatusCode.BadGateway, entityConflictRes.StatusCode);
+
+        payload = """
+            {
+              "entities":[],
+              "sceneFacts":[
+                {"factKey":"Dawn","factType":"Time","summary":"Early dawn","evidenceSegmentOrder":0},
+                {"factKey":"dawn","factType":"Time","summary":"Midnight","evidenceSegmentOrder":0}
+              ]
+            }
+            """;
+        var factConflictRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" });
+        Assert.Equal(HttpStatusCode.BadGateway, factConflictRes.StatusCode);
+
+        payload = """
+            {
+              "entities":[],
+              "speechObservations":[
+                {"speakerName":"Alice","speechRegister":"Polite","observation":"Uses formal tone","evidenceSegmentOrder":0},
+                {"speakerName":"alice","speechRegister":"Rude","observation":"Uses formal tone","evidenceSegmentOrder":0}
+              ]
+            }
+            """;
+        var speechConflictRes = await SendWithCsrfAsync(factory, client, HttpMethod.Post, $"/api/novels/{novelId}/story-memory/extract", new { targetLanguage = "vi", provider = "mock" });
+        Assert.Equal(HttpStatusCode.BadGateway, speechConflictRes.StatusCode);
+
+        using var entitiesDoc = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/story-memory")).Content.ReadAsStringAsync());
+        using var factsDoc = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/scene-facts")).Content.ReadAsStringAsync());
+        using var speechDoc = JsonDocument.Parse(await (await client.GetAsync($"/api/novels/{novelId}/speech-observations")).Content.ReadAsStringAsync());
+        Assert.Equal(0, entitiesDoc.RootElement.GetArrayLength());
+        Assert.Equal(0, factsDoc.RootElement.GetArrayLength());
+        Assert.Equal(0, speechDoc.RootElement.GetArrayLength());
+    }
 }

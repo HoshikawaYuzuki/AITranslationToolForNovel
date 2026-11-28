@@ -320,6 +320,15 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
 
             if (entitiesByKey.TryGetValue(normSource, out var existing))
             {
+                if (existing.Category != category ||
+                    !string.Equals(
+                        StoryEntityNormalizer.NormalizeKey(existing.TranslatedTerm),
+                        StoryEntityNormalizer.NormalizeKey(translatedTerm),
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Conflicting duplicate entity candidates for '{sourceTerm}' in extraction response.");
+                }
+
                 if (!StoryEntityNormalizer.TryValidateAliases(existing.SourceTerm, existing.Aliases.Concat(aliases), out var mergedAliases, out var mergeAliasErr))
                 {
                     throw new InvalidOperationException(mergeAliasErr);
@@ -327,7 +336,8 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                 entitiesByKey[normSource] = existing with
                 {
                     Aliases = mergedAliases,
-                    Description = existing.Description ?? description
+                    Description = existing.Description ?? description,
+                    EvidenceQuote = existing.EvidenceQuote ?? quote
                 };
             }
             else
@@ -381,7 +391,23 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
 
                 var (evidenceSeg, quote) = ResolveAndValidateEvidence(item, "sceneFacts", byOrder, byStableId);
 
-                if (!sceneFactsByKey.ContainsKey(normFactKey))
+                if (sceneFactsByKey.TryGetValue(normFactKey, out var existingFact))
+                {
+                    if (existingFact.FactType != factType ||
+                        !string.Equals(
+                            StoryEntityNormalizer.NormalizeKey(existingFact.Summary),
+                            StoryEntityNormalizer.NormalizeKey(summary),
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException($"Conflicting duplicate sceneFact candidates for '{factKey}' in extraction response.");
+                    }
+
+                    if (existingFact.EvidenceQuote is null && quote is not null)
+                    {
+                        sceneFactsByKey[normFactKey] = existingFact with { EvidenceQuote = quote };
+                    }
+                }
+                else
                 {
                     sceneFactsByKey[normFactKey] = new ExtractedSceneFactCandidate(
                         factKey,
@@ -451,7 +477,38 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
                 var (evidenceSeg, quote) = ResolveAndValidateEvidence(item, "speechObservations", byOrder, byStableId);
 
                 var compositeKey = (normSpeaker, normAddressee);
-                if (!speechByKey.ContainsKey(compositeKey))
+                if (speechByKey.TryGetValue(compositeKey, out var existingSpeech))
+                {
+                    var sameRegister = string.Equals(
+                        StoryEntityNormalizer.NormalizeKey(existingSpeech.SpeechRegister),
+                        StoryEntityNormalizer.NormalizeKey(register),
+                        StringComparison.Ordinal);
+                    var sameObservation = string.Equals(
+                        StoryEntityNormalizer.NormalizeKey(existingSpeech.Observation),
+                        StoryEntityNormalizer.NormalizeKey(observation),
+                        StringComparison.Ordinal);
+                    var hasPronounConflict = !string.IsNullOrEmpty(existingSpeech.PronounStyle)
+                        && !string.IsNullOrEmpty(pronounStyle)
+                        && !string.Equals(
+                            StoryEntityNormalizer.NormalizeKey(existingSpeech.PronounStyle),
+                            StoryEntityNormalizer.NormalizeKey(pronounStyle),
+                            StringComparison.Ordinal);
+                    if (!sameRegister || !sameObservation || hasPronounConflict)
+                    {
+                        throw new InvalidOperationException($"Conflicting duplicate speechObservation candidates for '{speakerName}' in extraction response.");
+                    }
+
+                    if ((existingSpeech.PronounStyle is null && pronounStyle is not null)
+                        || (existingSpeech.EvidenceQuote is null && quote is not null))
+                    {
+                        speechByKey[compositeKey] = existingSpeech with
+                        {
+                            PronounStyle = existingSpeech.PronounStyle ?? pronounStyle,
+                            EvidenceQuote = existingSpeech.EvidenceQuote ?? quote
+                        };
+                    }
+                }
+                else
                 {
                     speechByKey[compositeKey] = new ExtractedSpeechObservationCandidate(
                         speakerName,
@@ -487,13 +544,19 @@ public sealed class StoryMemoryExtractor : IStoryMemoryExtractor
             }
             order = ordVal;
         }
-        else if (item.TryGetProperty("firstSeenOrder", out var legacyOrdProp) && legacyOrdProp.ValueKind != JsonValueKind.Null)
+
+        if (item.TryGetProperty("firstSeenOrder", out var legacyOrdProp) && legacyOrdProp.ValueKind != JsonValueKind.Null)
         {
             if (legacyOrdProp.ValueKind != JsonValueKind.Number || !legacyOrdProp.TryGetInt32(out var legVal) || legVal < 0)
             {
                 throw new InvalidOperationException($"{section}.firstSeenOrder must be a non-negative integer.");
             }
-            order = legVal;
+
+            if (order.HasValue && order.Value != legVal)
+            {
+                throw new InvalidOperationException($"{section}.evidenceSegmentOrder ({order.Value}) and legacy firstSeenOrder ({legVal}) disagree.");
+            }
+            order ??= legVal;
         }
 
         var stableId = ReadStrictOptionalString(item, "evidenceSegmentStableId", section);

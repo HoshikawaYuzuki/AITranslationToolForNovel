@@ -967,7 +967,11 @@ public static partial class StoryMemoryEndpoints
                 if (translatedKey != candTranslatedKey)
                 {
                     existing.Status = FactStatus.Conflicted;
-                    existing.ConflictDetails = $"AI extraction suggested '{cand.TranslatedTerm}' (segment #{cand.EvidenceSegmentOrder}) conflicting with '{existing.TranslatedTerm}'.";
+                    existing.ConflictDetails = StoryEntityNormalizer.BuildConflictDetails(
+                        "translation",
+                        cand.TranslatedTerm,
+                        existing.TranslatedTerm,
+                        cand.EvidenceSegmentOrder);
                     existing.Aliases = mergedAliases;
                     existing.Version++;
                     existing.UpdatedAt = now;
@@ -985,6 +989,10 @@ public static partial class StoryMemoryEndpoints
                         existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
                         existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
                         existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
+                        {
+                            existing.Status = FactStatus.Provisional;
+                        }
                     }
                     existing.Version++;
                     existing.UpdatedAt = now;
@@ -1038,7 +1046,11 @@ public static partial class StoryMemoryEndpoints
                     StoryEntityNormalizer.NormalizeKey(existing.Summary) != StoryEntityNormalizer.NormalizeKey(cand.Summary))
                 {
                     existing.Status = FactStatus.Conflicted;
-                    existing.ConflictDetails = $"AI extraction reported '{cand.Summary}' (segment #{cand.EvidenceSegmentOrder}) conflicting with '{existing.Summary}'.";
+                    existing.ConflictDetails = StoryEntityNormalizer.BuildConflictDetails(
+                        "scene fact",
+                        cand.Summary,
+                        existing.Summary,
+                        cand.EvidenceSegmentOrder);
                     existing.Version++;
                     existing.UpdatedAt = now;
                     conflicted++;
@@ -1046,6 +1058,17 @@ public static partial class StoryMemoryEndpoints
                 }
                 else
                 {
+                    if (!existing.EvidenceSegmentId.HasValue)
+                    {
+                        existing.EvidenceSegmentId = cand.EvidenceSegmentId;
+                        existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
+                        existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
+                        existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
+                        {
+                            existing.Status = FactStatus.Provisional;
+                        }
+                    }
                     existing.Version++;
                     existing.UpdatedAt = now;
                     updated++;
@@ -1093,11 +1116,19 @@ public static partial class StoryMemoryEndpoints
                     continue;
                 }
 
-                if (StoryEntityNormalizer.NormalizeKey(existing.SpeechRegister) != StoryEntityNormalizer.NormalizeKey(cand.SpeechRegister) ||
-                    StoryEntityNormalizer.NormalizeKey(existing.Observation) != StoryEntityNormalizer.NormalizeKey(cand.Observation))
+                var hasPronounConflict = !string.IsNullOrEmpty(existing.PronounStyle)
+                    && !string.IsNullOrEmpty(cand.PronounStyle)
+                    && StoryEntityNormalizer.NormalizeKey(existing.PronounStyle) != StoryEntityNormalizer.NormalizeKey(cand.PronounStyle);
+                if (StoryEntityNormalizer.NormalizeKey(existing.SpeechRegister) != StoryEntityNormalizer.NormalizeKey(cand.SpeechRegister)
+                    || StoryEntityNormalizer.NormalizeKey(existing.Observation) != StoryEntityNormalizer.NormalizeKey(cand.Observation)
+                    || hasPronounConflict)
                 {
                     existing.Status = FactStatus.Conflicted;
-                    existing.ConflictDetails = $"AI extraction observed [{cand.SpeechRegister}] '{cand.Observation}' (segment #{cand.EvidenceSegmentOrder}) conflicting with [{existing.SpeechRegister}].";
+                    existing.ConflictDetails = StoryEntityNormalizer.BuildConflictDetails(
+                        "speech observation",
+                        $"[{cand.SpeechRegister}] {cand.Observation}",
+                        $"[{existing.SpeechRegister}] {existing.Observation}",
+                        cand.EvidenceSegmentOrder);
                     existing.Version++;
                     existing.UpdatedAt = now;
                     conflicted++;
@@ -1106,6 +1137,17 @@ public static partial class StoryMemoryEndpoints
                 else
                 {
                     existing.PronounStyle ??= cand.PronounStyle;
+                    if (!existing.EvidenceSegmentId.HasValue)
+                    {
+                        existing.EvidenceSegmentId = cand.EvidenceSegmentId;
+                        existing.EvidenceSegmentStableId = cand.EvidenceSegmentStableId;
+                        existing.EvidenceSegmentOrder = cand.EvidenceSegmentOrder;
+                        existing.EvidenceQuote ??= cand.EvidenceQuote;
+                        if (existing.Origin == StoryEntityOrigin.AiExtracted && existing.Status == FactStatus.Unknown)
+                        {
+                            existing.Status = FactStatus.Provisional;
+                        }
+                    }
                     existing.Version++;
                     existing.UpdatedAt = now;
                     updated++;
